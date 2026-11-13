@@ -1,7 +1,7 @@
 {
   "id": "design-pure",
   "name": "Design (pure)",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Design screens with your agents on a Canvas beside the chat: pure Luau, no companion program. Agents use design_execute, design_state and design_guide.",
   "entry": "init.luau",
   "service": "service.luau",
@@ -13,6 +13,7 @@
     "ui.add",
     "windows",
     "files",
+    "files.write",
     "sessions.read",
     "network",
     "fonts"
@@ -150,6 +151,6 @@
       "tab/zgx.json": "9669d5ffa2c81cc403850456ebcc1b2ce1b8b7c49adf2b544d551edfe1f2efad",
       "zeron.luau": "bb9a98bd24183c84f86a1a476f5cf1085b56157485d12f917e679e2fddac41c3"
     },
-    "sig": "4u1-9dVk0zqG6e2OeF_ljwrGpVgbH6KhdcO2wQ1Ei1eLEdHthw9t3sBE32_c-DKNIfDrBkBRjrizTri_OJIOAQ"
+    "sig": "-Dov8TgUAUmcJsSe4Ozn7MeRkeofqC_sg5uhmUyJHJlfkNBZKZcmAc4sWxlMukOnesllVBcle-nH8U7mqFXYDA"
   }
 }
