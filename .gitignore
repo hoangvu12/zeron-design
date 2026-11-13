@@ -1,0 +1,14 @@
+# Dev-only: never part of the plugin (pure/tools/install_plugin.py skips them).
+# The fixtures hold real designs: they must never reach this public repo.
+/dev/
+/tab/fixtures/
+/tab/harness.luau
+/tab/fixture_source.luau
+/harness_root.luau
+/guide/*.md
+# Any non-dot file at the top other than the plugin's would break the signature
+# Zeron checks when it installs from this repo.
+*.log
+*.zeron-plugin
+node_modules/
+target/
