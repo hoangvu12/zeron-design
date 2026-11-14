@@ -86,6 +86,42 @@ function M.page(self: Pdf, jpeg_b64: string, px_w: number, px_h: number, w: numb
 	table.insert(self.pages, page)
 end
 
+-- The pixels zgx makes of `n` points at `scale`: ceil(n × scale) in 32-bit
+-- floats, as `ui.render_canvas` sizes its picture (a page's image object
+-- says its size before zgx has made it).
+local function f32(x: number): number
+	return (string.unpack("<f", string.pack("<f", x)))
+end
+function M.pixels(n: number, scale: number): number
+	return math.ceil(f32(f32(n) * f32(scale)))
+end
+
+-- A page whose JPEG zgx writes onto the file's end itself
+-- (`ui.render_canvas { file, append = true }`: no pixels through Luau, and
+-- full size). `append()` makes and appends it, awaited, and gives
+-- `{ bytes, width, height }`; its length is an object of its own, written
+-- after it. `px_w`, `px_h`: `M.pixels` of the page's size.
+function M.page_appended(self: Pdf, append: () -> any, px_w: number, px_h: number, w: number, h: number)
+	local page, image, content, length = self.next_id, self.next_id + 1, self.next_id + 2, self.next_id + 3
+	self.next_id += 4
+	self.offsets[image] = self.at
+	self:put(`{image} 0 obj\n<< /Type /XObject /Subtype /Image /Width {math.floor(px_w)} /Height {math.floor(px_h)} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {length} 0 R >>\nstream\n`)
+	local got = append()
+	if type(got) ~= "table" or type(got.bytes) ~= "number" then
+		error("the page's picture wasn't added to the file")
+	end
+	if got.width ~= math.floor(px_w) or got.height ~= math.floor(px_h) then
+		error(`the page's picture is {got.width}×{got.height}, not {math.floor(px_w)}×{math.floor(px_h)}`)
+	end
+	self.at += got.bytes
+	self:put("\nendstream\nendobj\n")
+	self:object(length, tostring(got.bytes))
+	local draw = `q {num(w)} 0 0 {num(h)} 0 0 cm /Im0 Do Q`
+	self:object(content, `<< /Length {#draw} >>\nstream\n{draw}\nendstream`)
+	self:object(page, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {num(w)} {num(h)}] /Resources << /XObject << /Im0 {image} 0 R >> >> /Contents {content} 0 R >>`)
+	table.insert(self.pages, page)
+end
+
 function M.finish(self: Pdf)
 	local kids = {}
 	for _, p in self.pages do

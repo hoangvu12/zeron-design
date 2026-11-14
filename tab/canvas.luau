@@ -1124,7 +1124,17 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		end
 		local b = n.bounds
 		if opts and opts.measure then
-			return true, { w = math.max(1, b[3]), h = math.max(1, b[4]) }
+			local size: any = { w = math.max(1, b[3]), h = math.max(1, b[4]) }
+			-- (`opts.draw`: also its top left and its drawing, for zgx to make
+			-- the pixels itself: `z:add_canvas`, `render_canvas { append }`)
+			if (opts :: any).draw then
+				local slice = table.move(roots:peek()[n.root].nodes, n.at, n.at + (n.it.n or 0), 1, {})
+				size.x, size.y = b[1], b[2]
+				size.draw = function(c: Canvas)
+					Draw.draw_root(c, { nodes = slice })
+				end
+			end
+			return true, size
 		end
 		local root = roots:peek()[n.root]
 		local slice = table.move(root.nodes, n.at, n.at + (n.it.n or 0), 1, {})

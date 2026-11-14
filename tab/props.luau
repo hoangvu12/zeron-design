@@ -2242,6 +2242,36 @@ function M.Props(props: PropsProps): Node
 					end
 					return promise:await(), size, s
 				end
+				-- zgx makes the pixels and writes them itself, at full size
+				-- with none through the window (`z:add_canvas`,
+				-- `ui.render_canvas { file, append }`), when the Canvas gives
+				-- a layer's drawing (`measure` + `draw`: `{ w, h, x, y,
+				-- draw }`). Nil otherwise: the picture comes back as above.
+				local function drawing(id: string): any
+					if not props.render_layer then
+						return nil
+					end
+					local ok2, measured, d = pcall(props.render_layer, id, sc, { measure = true, draw = true })
+					if ok2 and measured == true and type(d) == "table" and type(d.draw) == "function" then
+						return d
+					end
+					return nil
+				end
+				local function made_opts(d: any, as: string?): any
+					local o: any = { width = d.w, height = d.h, scale = sc, x = d.x or 0, y = d.y or 0 }
+					if as then
+						o.format = as
+						o.quality = 90
+					end
+					return o
+				end
+				-- A zgx that appends a picture to a file refuses `append`
+				-- with no `file`; an older one ignores it (and would write
+				-- over the PDF), so it's asked first.
+				local function appends(): boolean
+					local ok2, why = pcall(ui.render_canvas, function(_: Canvas) end, { width = 1, height = 1, append = true } :: any)
+					return not ok2 and string.find(tostring(why), "append", 1, true) ~= nil
+				end
 				local function fell_note(): string
 					if #fell == 0 then
 						return ""
@@ -2259,10 +2289,21 @@ function M.Props(props: PropsProps): Node
 						local pdf = Pdf.new(function(data: any, first: boolean): any
 							return ui.write_file(file, data, if first then nil else { append = true } :: any)
 						end)
+						local direct = appends()
 						for k, id in ids do
 							status:set(`Exporting {k} of {#ids}…`)
-							local jpg, size, s = draw(id, "jpeg", k)
-							pdf:page(jpg, math.ceil(size.w * s), math.ceil(size.h * s), size.w, size.h)
+							local d = if direct then drawing(id) else nil
+							if d then
+								local o = made_opts(d, "jpeg")
+								o.file = file
+								o.append = true
+								pdf:page_appended(function(): any
+									return ui.render_canvas(d.draw, o):await()
+								end, Pdf.pixels(d.w, sc), Pdf.pixels(d.h, sc), d.w, d.h)
+							else
+								local jpg, size, s = draw(id, "jpeg", k)
+								pdf:page(jpg, math.ceil(size.w * s), math.ceil(size.h * s), size.w, size.h)
+							end
 						end
 						pdf:finish()
 					elseif #ids == 1 then
@@ -2307,7 +2348,12 @@ function M.Props(props: PropsProps): Node
 						if not file then
 							return
 						end
-						local z = ui.zip(file)
+						local z: any = ui.zip(file)
+						-- (zgx draws each entry on the zip's thread: `add_canvas`)
+						local got_add, add_canvas = pcall(function(): any
+							return z.add_canvas
+						end)
+						local direct = got_add and type(add_canvas) == "function"
 						-- (two layers of one name: "Card", "Card-2"; a zip
 						-- refuses a name twice)
 						local taken: { [string]: number } = {}
@@ -2318,7 +2364,13 @@ function M.Props(props: PropsProps): Node
 							if taken[nm] > 1 then
 								nm = `{nm}-{taken[nm]}`
 							end
-							z:add(`{nm}.{ext}`, { base64 = (draw(id, if fmt == "png" then nil else fmt, k)) })
+							local as = if fmt == "png" then nil else fmt
+							local d = if direct then drawing(id) else nil
+							if d then
+								z:add_canvas(`{nm}.{ext}`, d.draw, made_opts(d, as)):await()
+							else
+								z:add(`{nm}.{ext}`, { base64 = (draw(id, as, k)) })
+							end
 						end
 						z:close():await()
 					end

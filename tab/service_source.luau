@@ -8,7 +8,11 @@ local Draw = require("./draw")
 local Guard = require("./guard")
 local Roots = require("./roots")
 
-local MAX_BYTES = 900000
+-- A `scene` answer's size, at most (its JSON; past it, `more`). An answer
+-- becomes Luau tables all at once, with no garbage collected meanwhile:
+-- about 11 times its JSON in the window's plugin memory (32 MB, every
+-- Design tab's), so 900 KB answers took Workbook Studio past it.
+local MAX_BYTES = 300000
 
 return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> ())?, chat_title: ((string?) -> string?)? }?)
 	local o = opts or {}
@@ -76,12 +80,16 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 				end
 			end)
 		else
+			-- (A root still to come, in `more`, holds its place empty: the list
+			-- has the whole order from the first answer, so the answers after
+			-- it write their roots alone, by `set_key`. A whole `set` draws
+			-- every root again; on a large Design that, once an answer, left
+			-- garbage the next answer's tables landed on, past the window's
+			-- 32 MB plugin memory: "scene answer: not enough memory".)
 			local out = {}
 			for _, id in order or {} do
 				local r = got[id] or (if at[id] then list[at[id]] else nil)
-				if r then
-					table.insert(out, r)
-				end
+				table.insert(out, r or { id = id, nodes = {} })
 			end
 			roots:set(out)
 		end
