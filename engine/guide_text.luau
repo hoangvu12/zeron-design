@@ -12,7 +12,7 @@ You can't open a Design tab. To show the person a Design, tell them to open Desi
 
 `design_state` also says what the person has selected in each open Design (inside an Instance, `instance/node`). When they say "this" or "make it bigger", call `design_state` first and act on those ids. The person may move, retype and restyle nodes by hand while you work, and undo either of you: if your result has a `notice`, read the Design again before you change what you didn't just make.
 
-This guide is the rules, the API and the format, how to check your work, and how to design well. Topic guides go deeper: call `design_guide` with `components`, `design-systems`, `landing-pages`, `mobile-apps`, `web-apps`, `slides`, `tables`, `code` or `tailwind`.
+This guide is the rules, the API and the format, how to check your work, and how to design well. Topic guides go deeper: call `design_guide` with `components`, `design-systems`, `landing-pages`, `mobile-apps`, `web-apps`, `slides`, `tables`, `code`, `tailwind` or `prototyping`.
 
 ## The working loop
 
@@ -175,7 +175,7 @@ G.mobile = Insert({ type = "frame", name = "Home (mobile)", x = spot.x, y = spot
 
 ### TakeScreenshot(id) or TakeScreenshot({ ids })
 
-Attaches a PNG of each node to the call's result, its longest side at most 800 px. A 1440-wide Screen comes back at about half size, so screenshot the smallest node that shows what you need: a section, a card, a button. Use screenshots for colour, type and alignment; use a Get visitor for sizes, positions and clipping. Screenshots are drawn by Zeron's window: if none answers, the result says so and you get no picture.
+Attaches a PNG of each node to the call's result, its longest side at most 800 px. A 1440-wide Screen comes back at about half size, so screenshot the smallest node that shows what you need: a section, a card, a button. Use screenshots for colour, type and alignment; use a Get visitor for sizes, positions and clipping. Screenshots are drawn by Zeron's window: if none answers, the result says so and you get no picture. `TakeScreenshot(id, { state = "hover" })` (or `press`) draws it in that prototype state.
 
 ### Print(...)
 
@@ -191,6 +191,7 @@ For whoever implements the Design; it's for delivery, not for checking your work
 
 - `Export({ format = "handoff" })`: everything to build from, in one folder: each Screen as a PNG at 2x (`01-<name>.png`, in the Design's order), `index.html` (every Screen, plain CSS) and `tokens.json`. With ids, only those Screens. A call draws PNGs for about 20 s; when more are left, `exported.remaining` says how many and `exported.next` is the call that writes the rest (`Export({ format = "handoff", from = 13 })`).
 - `Export({ ids }, { format = "html", css, scaffold, layerNames })`: Screens (every Screen with no ids) as one HTML file. `css` is `"css"` (plain, the default) or `"tailwind"`; `scaffold = false` gives just the Screens and their styles instead of a whole page; `layerNames = true` puts each node's name on its element as `data-name`. Auto layout becomes flexbox and Tokens become CSS variables; it's a starting point to adapt, not production code.
+- `Export({ format = "html", prototype = true })`: a clickable prototype: one page, each Screen a section, links as real links with their transitions. Hover and press states export in every HTML export.
 - `Export({ ids }, { format = "png", scale })`: each node as a PNG file, at `scale` (2 by default, at most 8).
 
 ```luau
@@ -198,11 +199,15 @@ Export({ format = "handoff" })
 Export({ G.header }, { format = "html", css = "tailwind", scaffold = false })
 ```
 
+### Prototyping
+
+Make Screens clickable only when asked for a prototype, or for something "clickable" or "interactive". Then read `design_guide { topic = "prototyping" }`. In short: `states = { hover = {…}, press = {…} }` on the layer people point at (fill, stroke, effect, opacity, cornerRadius and scale only; put them on the Component), `Link(layer, screen, "push-left")`, `Link(backButton, "back")`, other triggers with `Link(a, b, "dissolve", { trigger = "hover" })` (hover, press, mouse enter/leave/down/up, after delay, key, drag), springs with `{ easing = "bouncy" }`, interactive components (a switch, a checkbox, tabs) as variant sets with `MakeVariants("Switch", { { props = { On = false }, node = off }, { props = { On = true }, node = on } })` and a Change to with `Link(off, { On = "true" }, "smart")`, `SetFlows({ { name = "Onboarding", start = firstScreen } })`, and variables (a cart count, signed in, dark mode) with `SetVars({ count = 0 })`, `content = "$count"` and actions `set`, `toggle`, `mode` and `if`. The person plays it with Play (Ctrl+Enter). You play it yourself with `Simulate(firstScreen, { "click Start", "wait 1500", "key Enter" })`: it returns the Screen, overlays and scroll shown, and problems (dead ends, unreachable Screens, broken or covered links, clicks that do nothing). Run it after each prototype change and fix what it finds.
+
 ## Nodes
 
 A node is `{ type, name, …properties }`. Unknown properties are kept but do nothing, with a warning, so a warning about one is almost always a typo. Nodes nest at most 48 deep.
 
-**Every node:** `id` (given by Insert), `name`, `x`, `y` (from its parent's top left), `rotation` (degrees counter-clockwise about its top left; it turns its children too), `opacity` (0 to 1), `enabled` (`false` hides it and leaves it out of layout), `flipX`, `flipY`, `absolute` (placed at its `x`/`y` even inside a layout, and left out of it), `theme` (see *Tokens*), `inProgress`.
+**Every node:** `id` (given by Insert), `name`, `x`, `y` (from its parent's top left), `rotation` (degrees counter-clockwise; it turns its children too. Insert and Update turn the layer about its centre, as Figma does, and store the moved `x`, `y`; a layer placed by its parent's layout turns about its slot's corner), `opacity` (0 to 1), `enabled` (`false` hides it and leaves it out of layout), `flipX`, `flipY`, `absolute` (placed at its `x`/`y` even inside a layout, and left out of it), `theme` (see *Tokens*), `inProgress`.
 
 **Types:**
 
@@ -296,9 +301,9 @@ Insert(G.screen, { type = "frame", name = "Intro", width = 560, layout = "vertic
 
 ### Tokens and Themes
 
-A **Token** is a named `color`, `number` or `string` that any property refers to as `"$name"` instead of a literal. Name Tokens without the `$` (letters, digits, `-`, `_`, `.`, `/`). A Token can vary by **Theme**: give it a list of `{ value, theme = { axis = value } }`. A node shows the first value of each axis unless it, or a node above it, sets `theme = { mode = "dark" }`. Name the axes and their values, first one first, with `SetThemes(axis, { values })`.
+A **Token** is a named `color`, `number`, `string` or `boolean` that any property refers to as `"$name"` instead of a literal (a boolean drives visibility: `enabled = "$isOpen"`). Name Tokens without the `$` (letters, digits, `-`, `_`, `.`, `/`). A Token can vary by **Theme**: give it a list of `{ value, theme = { axis = value } }`. A node shows the first value of each axis unless it, or a node above it, sets `theme = { mode = "dark" }`. Name the axes and their values, first one first, with `SetThemes(axis, { values })`.
 
-`SetTokens` merges into the existing Tokens (`null` removes one); `{ replace = true }` replaces them all. `GetTokens()` returns `{ tokens, themes }`. Read the existing Tokens before writing: they're binding, so extend them rather than overwrite them.
+`SetTokens` merges into the existing Tokens (`null` removes one); `{ replace = true }` replaces them all. `GetTokens()` returns `{ tokens, themes }`. For a prototype's variables, `SetVars({ count = 0, isOpen = false })` writes Tokens with the type taken from each value, and `GetVars()` reads them (see the prototyping guide). Read the existing Tokens before writing: they're binding, so extend them rather than overwrite them.
 
 ```luau
 SetThemes("mode", { "light", "dark" })
@@ -460,6 +465,7 @@ A **Component** is a Frame with `reusable = true`. `Copy` of it makes an **Insta
 - Make a Component as soon as a widget appears twice. Build it once, check it, then place Instances.
 - Make one generic Component that Instances adapt (a label, an icon, a colour), not near-duplicates. Make states that change the structure (a button with and without an icon, a filled and an empty field) separate Components.
 - Name variants with slashes: `Button/Primary`, `Button/Secondary`, `Field/Error`. The name says what it is, not what it looks like.
+- For a component that changes when clicked (a switch, a checkbox, tabs, an accordion), make a variant set with `MakeVariants` and link its members: see "Interactive components" in `design_guide { topic = "prototyping" }`.
 - Give the Component's inner nodes clear, unique names (`Label`, `Icon`), since Instances override them by name.
 - Size Components by their content (`fit_content`) or to fill their parent, so Instances adapt to where they're placed. Fixed pixel widths are for things that really are fixed (an avatar, an icon button).
 - Keep Components together on the Canvas, away from the Screens, and placed with `FindEmptySpace`.
@@ -1408,6 +1414,609 @@ Written by hand in the project, the same card is:
 ```
 ]]
 
-M.ORDER = { "components", "design-systems", "landing-pages", "mobile-apps", "web-apps", "slides", "tables", "code", "tailwind" }
+M.TOPICS["prototyping"] = [[
+# Prototyping: states, links and flows
+
+Make Screens clickable only when the person asks for a prototype, or for something "clickable" or "interactive". A prototype is the same Design with three additions:
+
+- **states:** how a layer looks while it's hovered or pressed;
+- **interactions:** where a click takes you, and with which transition;
+- **flows:** the starting points.
+
+and, for a Screen that scrolls, its device, scrolling frames, and fixed and sticky layers (see Scrolling). Interactive components (a switch, tabs) and **variables** (a cart count, signed in, dark mode, a score) build on these.
+
+The person plays it in the Design tab with **Play** (Ctrl+Enter). You play it yourself with **`Simulate`** (see Simulate): click through it, read what's shown, take screenshots, and fix what it finds before you hand it over.
+
+## States: hover and press
+
+Put `states` on the layer people point at: the button or the card, not its text.
+
+```luau
+G.home = Insert({ type = "frame", name = "Home", x = 0, y = 0, width = 390, height = 844, fill = "#F8FAFC", layout = "vertical", padding = 32, gap = 16 })
+G.button = Insert({ type = "frame", name = "Button", reusable = true, x = 0, y = -160, layout = "horizontal", justifyContent = "center", padding = { 14, 24 }, width = 326, fill = "#4F46E5", cornerRadius = 12,
+  states = {
+    hover = { fill = "#4338CA" },
+    press = { fill = "#3730A3", scale = 0.97 },
+    transition = { duration = 150, easing = "ease-out" },
+  },
+  children = { { type = "text", name = "Label", content = "Continue", fontSize = 16, fontWeight = 600, fill = "#FFFFFF" } } })
+G.cta = Copy(G.button, G.home, { name = "Get started", descendants = { Label = { content = "Get started" } } })
+```
+
+- **What a state may set:** `fill`, `stroke`, `effect`, `opacity`, `cornerRadius` and `scale` (0.5 to 2, about the centre). Tokens work (`"$primary-hover"`).
+- **What it may not set:** anything that changes layout, such as width, height, padding, gap, text content or font size. These are refused with an error. Use a separate Screen instead.
+- **Press** applies on top of hover.
+- **Transition:** it defaults to 150 ms ease-out. Use `duration = 0` to snap.
+- **Good defaults:** hover is one step darker (or lighter on dark); press is darker still, plus `scale = 0.97`.
+- **Children:** to recolour a layer inside when the parent is hovered, use `descendants` inside the state. Name the layer by its id or by a name that's unique inside, e.g. `hover = { fill = "#EEF2FF", descendants = { Title = { fill = "#4F46E5" } } }`.
+- **Components:** put states on the Component, and every Instance hovers alike. An Instance's own `states` replaces the Component's entirely. `Update(inst, { states = null })` brings the Component's back.
+
+## Links
+
+`Link(layer, to, transition)` adds a click link. `to` is a Screen's id, `"back"`, or a URL.
+
+```luau
+G.next = Insert({ type = "frame", name = "Next", x = 490, y = 0, width = 390, height = 844, fill = "#F8FAFC", layout = "vertical", padding = 32, gap = 16 })
+G.back = Insert(G.next, { type = "text", name = "Back", content = "← Back", fontSize = 15, fill = "#0F172A", states = { hover = { opacity = 0.6 } } })
+Link(G.cta, G.next, "push-left")
+Link(G.back, "back")
+Link(Insert(G.next, { type = "text", name = "Terms", content = "Terms", fontSize = 14, fill = "#475569" }), "https://example.com/terms")
+```
+
+- **Transitions as short strings:**
+  - `"instant"` and `"dissolve"`;
+  - `"push-<dir>"`, `"slide-in-<dir>"` (or `"slide-<dir>"`), `"slide-out-<dir>"`, `"move-in-<dir>"` and `"move-out-<dir>"`.
+  
+  `<dir>` is the direction the motion travels: `left`, `right`, `up` or `down`. They store 300 ms, ease-out.
+- **Choosing one:**
+  - forward in a flow: `push-left`;
+  - tabs and same-level switches: `dissolve`;
+  - a sheet that rises: `slide-up`;
+  - back buttons: just `"back"`, which plays the reverse of the way in.
+  
+  Keep durations at 200–400 ms.
+- **Full table:** `Link(a, b, { type = "dissolve", duration = 400, easing = "ease-in-out" })`. Easings are `linear`, `ease-in`, `ease-out`, `ease-in-out`, `ease-in-back`, `ease-out-back`, `ease-in-out-back`, or `{ x1, y1, x2, y2 }`.
+- **Multiple links:** `Link` appends a click reaction. `{ replace = true }` as the fourth argument replaces the layer's click links. On an Instance, its own link replaces the one it inherits.
+- **Rules:**
+  - Only Screens are targets (top-level frames, not Components).
+  - Link the outermost clickable layer, not its text.
+  - Don't put a link inside another link.
+
+## Triggers and lists of actions
+
+A reaction starts on a **trigger** and runs its **actions in order**, each after the one before it has finished animating (Figma's rule). `Link`'s fourth argument picks the trigger; `append = true` adds the action to the end of that trigger's list instead of making a new reaction.
+
+```luau
+G.splash = Insert({ type = "frame", name = "Splash", x = 0, y = 1000, width = 390, height = 844, fill = "#4F46E5" })
+G.menu = Insert({ type = "frame", name = "Menu", x = 490, y = 1000, width = 390, height = 844, fill = "#F8FAFC" })
+G.menuButton = Insert(G.home, { type = "frame", name = "Menu button", width = 120, height = 44, cornerRadius = 10, fill = "#E2E8F0" })
+G.card = Insert(G.home, { type = "frame", name = "Card", width = 326, height = 120, cornerRadius = 16, fill = "#FFFFFF" })
+Link(G.splash, G.home, "dissolve", { trigger = { type = "afterDelay", ms = 1500 }, easing = "gentle" })
+Link(G.menuButton, G.menu, "dissolve", { trigger = "hover" })   -- while hovering; back when the pointer leaves
+Link(G.home, G.next, "slide-up", { trigger = { type = "key", keys = { "Ctrl", "K" } } })
+Link(G.card, G.next, "push-left", { trigger = "drag", easing = "quick" })
+Link(G.card, G.next, "dissolve")
+Link(G.card, G.menu, "push-left", { append = true, easing = "bouncy" })   -- then on to Menu
+```
+
+- **Triggers** (`trigger =` a name, or a table with its settings):
+  - `"click"` (the default);
+  - `"hover"` and `"press"`: the actions run while the pointer is over the layer, or while it's held, and **revert** when that ends (a Screen they went to goes back the reverse way): menus, tooltips, peeks;
+  - `"mouseEnter"`, `"mouseLeave"`, `"mouseDown"`, `"mouseUp"`: one-off, with no revert. `{ type = "mouseEnter", delay = 300 }` waits until the pointer has stayed 300 ms. Pair enter and leave to undo something by hand;
+  - `{ type = "afterDelay", ms = 1500 }`: once, that long after its Screen shows. Splash Screens, auto-advancing steps. Put it on the Screen itself;
+  - `{ type = "key", keys = "Enter" }` or `keys = { "Shift", "D" }`: one key (a letter, a digit, `Enter`, `Escape`, `Space`, `Tab`, `Backspace`, `Delete`, the arrows `ArrowLeft`…, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`) with any of `Shift`, `Ctrl`, `Alt`, `Meta`. It works while its Screen shows, and wins over Play's own keys (Esc and Ctrl+Enter still close);
+  - `"drag"`: a press that moves 4 points runs it (a swipe to the next card).
+- **One of each trigger per layer**, except `key` and `drag` (`duplicate-trigger` warns; only the first runs). Don't put `click` and `hover` on one layer: use `mouseEnter` and `mouseLeave` with the click.
+- **Several actions:** `actions = { a, b, … }` all run, in order. A navigate in the middle carries on from the Screen it reached.
+- **Reserved:** `{ action = "motion", play = id }` (play a timeline motion) is kept in the file but doesn't play yet (`motion-reserved` warns).
+
+## Easing: springs and curves
+
+- **Durations** go up to 10,000 ms.
+- **Springs** feel physical and natural for sheets, cards and anything dragged. A spring sets its own duration (when it comes to rest; `"quick"` 708 ms, `"gentle"` 792 ms), as in Figma, so don't pass a `duration` with one: it's ignored and `spring-duration` warns. For a set time, use a curve such as `"ease-out"`:
+  - presets `"gentle"` (soft, the most neutral), `"quick"` (fast, short settle: toasts), `"bouncy"` (overshoots and wobbles: playful moments), `"slow"` (steady, no overshoot: big content);
+  - `{ spring = { mass = 1, stiffness = 170, damping = 26, velocity = 0 } }`: more stiffness is faster, more damping is less bounce, more mass is heavier. A spring that takes over 10 s to settle is refused.
+- **Custom bézier:** `{ x1, y1, x2, y2 }`, x within 0–1 (as CSS `cubic-bezier`).
+- `Link(a, b, "push-left", { easing = "bouncy" })`, or in the full table: `transition = { type = "push", direction = "left", easing = "bouncy" }`. State transitions take springs too: `states = { hover = { scale = 1.03 }, transition = { easing = "quick" } }`.
+- The HTML export plays springs as CSS `linear()`, the same curve as Play.
+
+## Flows
+
+The first flow is where Play starts.
+
+```luau
+SetFlows({ { name = "Onboarding", start = G.home, description = "New user signs up.\n- Welcome\n- Sign up\nSpec: https://example.com/spec" } })
+Print(GetFlows()[1].name)
+```
+
+- `description` (optional, plain text, at most 2,000 characters) shows under the flows in Play's **Flows** sidebar. Lines starting `- ` or `1. ` show as lists, and `https://…` as links.
+- The sidebar opens by itself when there are 2+ flows. Picking a flow there restarts at its start, as Restart does.
+
+## Scrolling and the device
+
+Play shows each Screen in a **device**: a Screen taller than the device scrolls inside it, as on a phone. Inside a Screen, a frame with `overflow` scrolls its own content (a list, a carousel), and a layer with `scroll` stays put (`"fixed"`: a header, a tab bar) or sticks at the top (`"sticky"`: a section title).
+
+```luau
+SetPrototype({ device = "iphone-16" })
+G.feed = Insert({ type = "frame", name = "Feed", x = 980, y = 0, width = 393, height = 1400, fill = "#F8FAFC", layout = "vertical", gap = 16, padding = { 80, 16, 100, 16 } })
+Insert(G.feed, { type = "frame", name = "Header", absolute = true, x = 0, y = 0, width = 393, height = 64, fill = "#0F172A", scroll = "fixed" })
+G.stories = Insert(G.feed, { type = "frame", name = "Stories", width = 361, height = 120, overflow = "horizontal", layout = "horizontal", gap = 12 })
+for i = 1, 6 do Insert(G.stories, { type = "frame", name = "Story", width = 96, height = 120, cornerRadius = 16, fill = "#C7D2FE" }) end
+G.section = Insert(G.feed, { type = "frame", name = "Recent", width = 361, layout = "vertical", gap = 12 })
+Insert(G.section, { type = "text", name = "Recent title", content = "Recent", fontSize = 15, fontWeight = 600, fill = "#0F172A", scroll = "sticky" })
+for i = 1, 8 do Insert(G.section, { type = "frame", name = "Row", width = 361, height = 72, cornerRadius = 12, fill = "#FFFFFF" }) end
+G.tabbar = Insert(G.feed, { type = "frame", name = "Tab bar", absolute = true, x = 0, y = 852 - 84, width = 393, height = 84, fill = "#FFFFFF", scroll = "fixed" })
+G.toTop = Insert(G.tabbar, { type = "frame", name = "Top", x = 24, y = 16, width = 64, height = 40, cornerRadius = 10, fill = "#4F46E5",
+  interactions = { { trigger = "click", actions = { { action = "scrollTo", to = G.section, offset = 72, transition = { type = "animate", duration = 400, easing = "ease-in-out" } } } } } })
+```
+
+- **The device:** `SetPrototype({ device = "iphone-16" })` sets Play's viewport for every Screen, and draws the device round it. See Presenting for the presets and the other keys. Without a device, each Screen plays at its own size.
+- **Make the Screen as tall as its content** and let it scroll: a phone feed is 393 wide and as tall as it needs. Put what must stay visible (header, tab bar) in `scroll = "fixed"` layers, with `absolute = true` at their place in the device (a tab bar at `y = 852 - 84` on an iPhone 16).
+- **`overflow = "vertical" | "horizontal" | "both"`** on a frame with a **fixed size**: its content scrolls inside it. A frame that hugs its content has nothing to scroll (`scroll-fits` warns): give it a width or height, or wrap the content in a frame that scrolls. Horizontal is the carousel.
+- **`scroll = "fixed"`** works on a Screen's own layers and on a scrolling frame's own layers. In an auto layout, also set `absolute = true` (`scroll-fixed` warns otherwise).
+- **`scroll = "sticky"`** scrolls with the rest, then sticks at the top of what scrolls while its own parent is still in view: section titles inside their section.
+- **Scroll to:** `{ action = "scrollTo", to = layerId, offset?, transition? }` scrolls the nearest scrolling frame around the layer (or the Screen) so the layer is at its top, less `offset` points. `transition = { type = "animate", duration, easing }`, or none for a jump. The layer must be on the same Screen (`scroll-target` warns).
+- **Scroll memory:** as in Figma, a Screen opens scrolled where it was last, shared with Screens of the same name, or the same name before a "/" (`Checkout / 1`, `Checkout / 2`). `{ action = "navigate", to = id, resetScroll = true }` opens it at the top.
+- In Play the wheel scrolls the innermost scrolling frame under the pointer, a drag scrolls (with momentum), and Restart forgets the positions. The HTML export scrolls with real CSS (`overflow`, `position: sticky`).
+
+## Presenting
+
+```luau
+SetPrototype({ device = "iphone-16", model = "Pink", rotate = false, fit = "fit", background = "#111827" })
+SetPrototype({ showFrame = false })
+Print(GetPrototype().model)
+```
+
+- **`device`:** a preset, or `{ w = 390, h = 844 }` (no frame drawn).
+  - Phones: `iphone-17`, `iphone-17-pro`, `iphone-17-pro-max`, `iphone-air`, `iphone-16`, `iphone-16-pro`, `iphone-16-pro-max`, `iphone-se`, `android-compact`, `android-medium`.
+  - Tablets: `ipad-mini`, `ipad-pro-11`, `ipad-pro-12-9`, `ipad-pro-13`, `android-expanded`, `surface-pro-8`.
+  - Watches: `apple-watch-41`, `apple-watch` (45 mm).
+  - Computers and TV: `macbook-air`, `macbook-pro-14`, `macbook-pro-16`, `desktop`, `tv`.
+- **`model`:** the frame's colour, one of the preset's (`iphone-16`: Black, White, Pink, Teal, Ultramarine). A wrong name fails with the list. Changing the device drops a model it doesn't have.
+- **`rotate = true`:** landscape. The device turns, but the Screen keeps its layout (a portrait Screen sits at the top left and scrolls), as Figma's Fixed size.
+- **`showFrame = false`:** no frame drawn (the default is to draw it for a preset).
+- **`fit`:** how Play scales into the window:
+  - `"fit"` (the default): the whole Screen, at most 100%;
+  - `"width"`: fit the width (a long Screen scrolls);
+  - `"actual"`: 100%;
+  - `"fill"`: cover the window, cropped;
+  - `"responsive"`: see below.
+- **`deviceFit`** (with a frame): `"fit"` (the device fits on screen), `"fill"` (zoom the device to fill the screen), `"actual"` (100%).
+- **`background`:** the colour round the device.
+- `SetPrototype` changes only the keys you give. `SetPrototype(nil)` clears them all.
+- **Play's own menus** (Options, and the device name in the bar) change the scaling for that session only. Z cycles it. The Design keeps your keys.
+- **Responsive** lays each Screen out again at the window's width (with a device, at the device's size, so landscape re-lays out). Auto layout, fill and hug reflow. The Screen is as tall as the window, or as its content if that's taller (then it scrolls). **There are no constraints:** a layer outside auto layout keeps its left/top, so pin things with auto layout (fill, hug, padding) if they must stretch or follow the right edge. Overlays keep their size.
+- The HTML export draws the same frame, scaled to fit the browser window. It hides the frame when the window is under 1.2× the device's width, or with `?frame=0` in the URL.
+- **Play's keys:** → (or Space, N) goes forward: forward history, else the shown Screen's first link to a Screen not yet visited, else the next Screen by x, then y. ← is Back, R restarts, Z cycles the scaling, Ctrl+\ hides the bar. A click on nothing flashes the hotspots (Options › Show hints on click). A key trigger of the Design's own wins over these.
+- **The person, in the editor** (not for snippets; say them if asked): Shift+Space opens a small live Preview beside the canvas (it follows edits and jumps to a Screen clicked on the canvas); Shift+E switches the right panel between Design and Prototype; on the Prototype tab a noodle can be clicked, its arrow end dragged to another Screen, or dragged off to remove it; Ctrl+C / X / V copy, cut and append interactions; with several layers selected the panel edits them all (differing values read "Mixed"); "Select N matching interactions" picks the layers with the same name and link in other Screens.
+
+## Simulate: play it yourself
+
+`Simulate(start, steps, opts?)` plays the prototype headless, by Play's own rules:
+- the same triggers, action lists, transition times, history and Back;
+- scroll memory, overlays and hover/press reverts.
+
+It returns what a person would see after each step, and the problems it met. Run it after every prototype change, the way you'd click through it.
+
+**Worked example.** Build a 3-Screen sign-up, then Simulate it and fix what it finds:
+
+```luau
+G.suWelcome = Insert({ type = "frame", name = "Sign up / Welcome", x = 0, y = 2000, width = 390, height = 844, fill = "#FFFFFF", layout = "vertical", padding = 32, gap = 16 })
+G.suForm = Insert({ type = "frame", name = "Sign up / Details", x = 440, y = 2000, width = 390, height = 844, fill = "#FFFFFF", layout = "vertical", padding = 32, gap = 16 })
+G.suDone = Insert({ type = "frame", name = "Sign up / Done", x = 880, y = 2000, width = 390, height = 844, fill = "#FFFFFF", layout = "vertical", padding = 32, gap = 16 })
+Insert(G.suWelcome, { type = "text", name = "Title", content = "Create your account", fontSize = 28, fontWeight = 700, fill = "#0F172A" })
+G.suStart = Insert(G.suWelcome, { type = "frame", name = "Start", width = 326, height = 52, cornerRadius = 12, fill = "#4F46E5", states = { hover = { fill = "#4338CA" } } })
+Insert(G.suForm, { type = "frame", name = "Email", width = 326, height = 52, cornerRadius = 12, stroke = { fill = "#CBD5E1", thickness = 1 } })
+G.suNext = Insert(G.suForm, { type = "frame", name = "Create account", width = 326, height = 52, cornerRadius = 12, fill = "#4F46E5" })
+G.suBack = Insert(G.suForm, { type = "text", name = "Back", content = "← Back", fontSize = 15, fill = "#0F172A" })
+Insert(G.suDone, { type = "text", name = "Done title", content = "You're in", fontSize = 28, fontWeight = 700, fill = "#0F172A" })
+Link(G.suStart, G.suForm, "push-left")
+Link(G.suBack, "back")
+```
+
+```luau
+local run = Simulate(G.suWelcome, { "click Start", "click Create account" })
+Print(run.screen.name)          --> Sign up / Details
+for _, p in run.problems or {} do Print(p.kind, p.message) end
+--> dead-click   clicking "Create account" on Sign up / Details does nothing: no click reaction on it or around it
+--> unreachable  1 Screen can't be reached from "Sign up / Welcome" (…): "Sign up / Done" (…) …
+```
+
+Fix what it found, then play it again, with a screenshot halfway through the last push and one at the end:
+
+```luau
+Link(G.suNext, G.suDone, "push-left")
+Link(G.suDone, G.suWelcome, "dissolve", { trigger = { type = "afterDelay", ms = 2000 } })
+local run = Simulate(G.suWelcome, { "click Start", "back", "click Start", { click = "Create account", shot = 150 }, "wait 2500" }, { shots = "end" })
+Print(run.screen.name, #run.shots)  --> Sign up / Welcome 2
+for _, p in run.problems or {} do Print(p.kind, p.message) end   --> (none about the sign-up)
+```
+
+- **Start:** a Screen id, a Screen's name, or a flow's name. Without one, it starts at the first flow, or at the first Screen.
+- **Steps:**
+  - `"click <layer>"`, `"hover <layer>"`, `"leave"`, `"press <layer>"`, `"release"`;
+  - `"drag <layer>"` (runs its drag trigger), or `"drag <layer> 0 -300"` (scrolls, as a finger does, when nothing there has a drag trigger). On a drag trigger that smart-animates (navigate or Change to) a layer that travels, as a switch's knob, `"drag Knob 12 0"` scrubs as in Play: the transition follows the drag along the knob's travel, and on release lands forward past half way, else goes back. The step's `scrub` says `p` (0 to 1), `lands` and `ms`; `{ drag = "Knob", by = { x = 12, y = 0 }, shot = 0 }` is the frame where it was let go. A layer that doesn't travel (the switch's track) plays the transition through. Under 4 points isn't a drag;
+  - `"key Enter"`, `"key Ctrl+K"`;
+  - `"wait 1500"` (timers run: afterDelay, delayed mouseEnter);
+  - `"scroll 400"`, or `"scroll <layer> 300 0"` (a wheel over that layer);
+  - `"back"` and `"restart"` (Play's ← and R);
+  - `"shot"`.
+  
+  A `<layer>` is an id or a name path from the Screen (`"Form/Continue"`, or just `"Continue"` when that's unique). Layers on an open overlay come first.
+- **Clicks act like a pointer.** A click points at the middle of what shows of the layer, as a person would, so it also hovers and presses. It goes to whatever is on top there.
+- **Waiting:** a step waits for a transition still running, then lets the transition it started finish. Time is virtual: a run is instant and gives the same result every time.
+- **The result:**
+  - `screen = { id, name }`, `overlays = { { id, name, x, y, w, h } }`, and `history` (how many Back steps there are);
+  - `scroll`: scrollers that can move, with `layer`, `x`, `y` and `max`;
+  - `states`: a layer hovered or pressed;
+  - `pending`: timers still to run, with `in_ms` and `what`;
+  - `opened`: URLs it would open;
+  - `t`: ms since the start;
+  - `steps`: per step, `did` (what ran: "navigate → Done (push left, 300 ms)"), `screen`, `overlays`, `notes`, `problems` and `error`. A step that can't run, like an unknown layer, has an `error`, and the rest still run;
+  - `problems` and `ok`.
+- **Problems** (`{ kind, message, layer?, screen? }`). Found on the way:
+  - `dead-click`: nothing reacts there;
+  - `covered`: another layer is on top of the one you meant, so the click went to it;
+  - `offscreen`: scroll first;
+  - `no-op`: a reaction ran but nothing changed, such as a link to the Screen you're on;
+  - `no-reaction`: a key or drag nothing listens to;
+  - `broken-link`, `back-empty`, `not-found`, `runaway` (timers that loop with no delay).
+  
+  Found over everything reachable from the start:
+  - `unreachable` Screens;
+  - `dead-end`: a Screen with no way on, which is fine for the last one;
+  - `stuck-overlay`: an overlay nothing closes;
+  - `covered` and `hidden-link`: links under another layer, cut off, or with no size;
+  - `key-reserved`: Escape, which Play keeps for itself.
+  
+  Pass `{ check = false }` to get only what the steps met.
+- **Screenshots:**
+  - a `"shot"` step;
+  - `{ click = "Next", shot = 150 }`, a frame 150 ms into what that step started (mid-transition);
+  - `{ shots = "each" }` (after every step) or `"end"`.
+  
+  They come back with the call's other images, in order. `run.shots` says which step each one is. Each is the device viewport as Play shows it: scrolled, hovered, overlays and backdrop included. At most 12 a call.
+- **The viewport** is the device (`SetPrototype`). Without one, it's each Screen's own size.
+
+## Interactive components
+
+A switch, a checkbox, tabs or an accordion is a **variant set**: Components with the same set name, each with its own property values (`On = "true"`). A link between two members is a **Change to**: an Instance that shows one member switches to the other, in place, without leaving the Screen. Every Instance of the set works this way, wherever it is used.
+
+- `MakeVariants(set, { { props = { On = false }, node = id }, … })` makes the members (it returns their ids). Values are stored as text: `false` becomes `"false"`.
+- `Variant(set, props)` returns a member's id. `Update(instance, { props = { On = "true" } })` shows another member on an Instance (the one whose props match best); its overrides carry over by layer name.
+- `Link(layer, { On = "true" }, "smart")`, or `Link(layer, memberId, …)`, on a layer of a member, makes a Change to. It switches the closest Instance around that layer whose set holds the target, so a layer inside a nested Instance (a chevron in a row) changes its parent.
+- Transitions: `instant`, `dissolve` or `smart`. With `smart`, the layers both members have tween (the knob slides, the colour fades). A member of another size reflows the Screen: an open accordion row pushes the layers below it down, on the same curve.
+- Hover and press looks can be variants too: `Link(button, { State = "Hover" }, "instant", { trigger = "hover" })` goes back when the pointer leaves. For a plain look, `states` are simpler.
+- **Memory (as Figma):** the member an Instance shows is remembered by its set and name path and shared everywhere, on every Screen and overlay. Turn "Wifi" on and every Instance named "Wifi" of that set shows on, on other Screens too, after Back, and in an overlay; an overlay's change shows on the Screen under it once it closes. A navigate with `resetComponents = true` forgets the target Screen's Instances; Restart forgets everything. So give Instances that mean different things different names.
+- `Simulate` returns `components = { { layer = "Preferences/Wifi", set = "Switch", variant = "On=true", id } }`. Its steps say `change "Wifi" to …`, and its problems include `variant-target` (no Instance of the set around the layer) and `no-op` (it shows that member already). Lint warns about `variant-duplicate` (two members with the same props), `variant-props` (a member with other property names) and `variant-target`.
+- The HTML export plays them too: each Screen's reachable variant states are sections of their own (at most 32 a Screen).
+
+**A switch.** Two members; each changes to the other. Then a Screen with two of them, played:
+
+```luau
+G.swOff = Insert({ type = "frame", name = "Switch / Off", x = 0, y = 4000, width = 52, height = 32, cornerRadius = 16, fill = "#CBD5E1" })
+Insert(G.swOff, { type = "frame", name = "Knob", x = 4, y = 4, width = 24, height = 24, cornerRadius = 12, fill = "#FFFFFF" })
+G.swOn = Insert({ type = "frame", name = "Switch / On", x = 80, y = 4000, width = 52, height = 32, cornerRadius = 16, fill = "#16A34A" })
+Insert(G.swOn, { type = "frame", name = "Knob", x = 24, y = 4, width = 24, height = 24, cornerRadius = 12, fill = "#FFFFFF" })
+MakeVariants("Switch", { { props = { On = false }, node = G.swOff }, { props = { On = true }, node = G.swOn } })
+Link(G.swOff, { On = "true" }, "smart", { easing = "quick" })
+Link(G.swOn, { On = "false" }, "smart", { easing = "quick" })
+
+G.prefs = Insert({ type = "frame", name = "Preferences", x = 0, y = 4400, width = 390, height = 844, fill = "#F8FAFC", layout = "vertical", padding = 24, gap = 16 })
+Insert(G.prefs, { type = "instance", ref = G.swOff, name = "Wifi" })
+Insert(G.prefs, { type = "instance", ref = G.swOff, name = "Bluetooth" })
+local run = Simulate(G.prefs, { "click Wifi" })
+local shows = {}
+for _, c in run.components or {} do shows[c.layer] = c.variant end
+assert(shows["Preferences/Wifi"] == "On=true" and shows["Preferences/Bluetooth"] == "On=false", "the switch")
+```
+
+**A checkbox.** The tick only the checked member has fades in:
+
+```luau
+G.cbOff = Insert({ type = "frame", name = "Checkbox / Off", x = 200, y = 4000, width = 24, height = 24, cornerRadius = 6, fill = "#FFFFFF", stroke = { fill = "#94A3B8", thickness = 2 } })
+G.cbOn = Insert({ type = "frame", name = "Checkbox / On", x = 240, y = 4000, width = 24, height = 24, cornerRadius = 6, fill = "#4F46E5" })
+Insert(G.cbOn, { type = "text", name = "Tick", content = "✓", x = 6, y = 2, fontSize = 15, fontWeight = 700, fill = "#FFFFFF" })
+MakeVariants("Checkbox", { { props = { Checked = false }, node = G.cbOff }, { props = { Checked = true }, node = G.cbOn } })
+Link(G.cbOff, { Checked = "true" }, "dissolve", { duration = 150 })
+Link(G.cbOn, { Checked = "false" }, "dissolve", { duration = 150 })
+
+Insert(G.prefs, { type = "instance", ref = G.cbOff, name = "Terms" })
+local run = Simulate(G.prefs, { "click Terms", "click Terms", "click Terms" })
+local shows = {}
+for _, c in run.components or {} do shows[c.layer] = c.variant end
+assert(shows["Preferences/Terms"] == "Checked=true", "the checkbox")
+```
+
+**Tabs.** One member per tab; in each, the other tabs' labels change to their member, and the indicator slides:
+
+```luau
+local tabs = { "Home", "Search", "Profile" }
+local members, labels = {}, {}
+for i, active in tabs do
+  local m = Insert({ type = "frame", name = "Tabs / " .. active, x = 400, y = 3940 + i * 60, width = 390, height = 48, fill = "#FFFFFF" })
+  labels[i] = {}
+  for j, name in tabs do
+    labels[i][j] = Insert(m, { type = "text", name = name, content = name, x = (j - 1) * 130 + 40, y = 14, fontSize = 15, fontWeight = if i == j then 600 else 400, fill = if i == j then "#4F46E5" else "#64748B" })
+  end
+  Insert(m, { type = "frame", name = "Indicator", x = (i - 1) * 130 + 15, y = 44, width = 100, height = 4, cornerRadius = 2, fill = "#4F46E5" })
+  members[i] = { props = { Tab = active }, node = m }
+end
+G.tabs = MakeVariants("Tabs", members)
+for i in tabs do
+  for j, name in tabs do
+    if i ~= j then Link(labels[i][j], { Tab = name }, "smart", { easing = "gentle" }) end
+  end
+end
+```
+
+**A segmented control.** The same shape, with a thumb that slides under the labels:
+
+```luau
+local ranges = { "Day", "Week", "Month" }
+local members, labels = {}, {}
+for i, active in ranges do
+  local m = Insert({ type = "frame", name = "Range / " .. active, x = 800, y = 3940 + i * 60, width = 300, height = 36, cornerRadius = 10, fill = "#E2E8F0" })
+  Insert(m, { type = "frame", name = "Thumb", x = (i - 1) * 100 + 2, y = 2, width = 96, height = 32, cornerRadius = 8, fill = "#FFFFFF" })
+  labels[i] = {}
+  for j, name in ranges do
+    labels[i][j] = Insert(m, { type = "text", name = name, content = name, x = (j - 1) * 100 + 32, y = 9, fontSize = 14, fontWeight = if i == j then 600 else 400, fill = "#0F172A" })
+  end
+  members[i] = { props = { Range = active }, node = m }
+end
+MakeVariants("Range", members)
+for i in ranges do
+  for j, name in ranges do
+    if i ~= j then Link(labels[i][j], { Range = name }, "smart", { easing = "quick" }) end
+  end
+end
+
+G.browse = Insert({ type = "frame", name = "Browse", x = 440, y = 4400, width = 390, height = 844, fill = "#F8FAFC", layout = "vertical", padding = 24, gap = 16 })
+Insert(G.browse, { type = "instance", ref = G.tabs[1], name = "Tabs" })
+Insert(G.browse, { type = "instance", ref = Variant("Range", { Range = "Day" }), name = "Range" })
+local run = Simulate(G.browse, { "click Tabs/Search", "click Range/Month", "click Range/Week" })
+local shows = {}
+for _, c in run.components or {} do shows[c.layer] = c.variant end
+assert(shows["Browse/Tabs"] == "Tab=Search" and shows["Browse/Range"] == "Range=Week", "tabs and the segmented control")
+```
+
+## Variables
+
+A prototype can remember things: a cart count, whether you're signed in, a quiz score, dark mode. A **variable is a Token** (number, text, true/false or colour); its modes are a Theme axis. Clicks change them, layers show them, and `if` decides with them.
+
+- **Make them:** `SetVars({ count = 0, signedIn = false, name = "Ann", accent = "#EF4444" })`. The type comes from the value. A value per mode is a list: `{ { value = 1, theme = { product = "a" } }, { value = 5, theme = { product = "b" } } }`. `null` deletes. They're ordinary Tokens, so `GetTokens` and the Variables panel show them.
+- **Read them:** `GetVars()` → `{ count = { type = "number", value = 0 }, … }` (`values` too when it has modes); `GetVars("count")` for one.
+- **Bind layers to them** with `"$name"`:
+  - text: `content = "$count"` (a number shows as text: `3`, `3.99`, at most 2 decimals);
+  - visibility: `enabled = "$signedIn"` (hidden layers leave the auto layout, which closes up);
+  - an Instance's variant: `props = { LoggedIn = "$signedIn" }` (picks the member; see Interactive components). It's **two-way**: a Change to on that Instance writes the variable;
+  - any colour or number: `fill = "$accent"`, `width = "$barWidth"`.
+  
+  Only a whole `"$name"` binds; there are no text templates. For "3 items", put `$count` and `items` side by side in a row, or set a text variable with an expression.
+- **Change them** (actions in `interactions`, run in order like any others):
+  - `{ action = "set", var = "count", to = 0 }`: a literal (`"Ann"`, `true`, `"#EF4444"`, `"$other"` copies another);
+  - `{ action = "set", var = "count", to = "{count + 1}" }`: a string that is exactly `"{…}"` is an expression;
+  - `{ action = "toggle", var = "signedIn" }` flips a boolean;
+  - `{ action = "mode", axis = "theme", value = "dark" }` switches the page's mode (Figma's Set variable mode). Layers with their own `theme` keep it;
+  - `{ action = "if", cond = "{email != '' and agree}", ["then"] = { … }, ["else"] = { … } }`. `else` is optional; else-if is an `if` inside `else`.
+- **Expressions:** `+ - * /`, unary `-`, `== != < <= > >=`, `and or not`, brackets, numbers, `'text'`, `true`/`false`. Text `+` joins, and a number joins as text (`'Hi ' + name`, `'' + score + ' / 5'`). Names with `/` or `-` go in square brackets: `{[cart/count] + 1}`. `count:pears` reads one mode's value (`count:product=pears` when the value name is on two axes). No functions and no `&&`/`||`. Division by zero gives 0 and a `div-zero` problem.
+- **Try one:** `Eval("{count + 1}", { count = 2 })` → `3`. Other names read the Design's values; `Eval("price", nil, { mode = { product = "pears" } })` reads a mode. It returns `value, problems`; a bad expression fails the call with the reason.
+- **Lifetime (as Figma):** values live for the whole playing session, through navigate, Back, overlays and component resets. **Only Restart** (R in Play, `"restart"` in Simulate) puts them, and the mode, back. A set just before a navigate already shows on the new Screen's first frame.
+- **No animation:** a variable change snaps, as in Figma. An action that animates (navigate, Change to, overlay) holds the actions after it until it ends, so a mode set after a 300 ms Change to lands at 300 ms.
+- **Per mode:** a set writes the value of the mode the clicked layer sees. A `+1` button inside a card with `theme = { product = "pears" }` changes only pears' value.
+- **Simulate with variables:**
+  - steps `"set count=3"`, `"set name='Ann'"`, `"set n={n * 2}"`, `"mode theme=dark"` (or `{ set = { count = 3 } }`, `{ mode = { theme = "dark" } }`), in the page's mode;
+  - start values: `Simulate(start, steps, { vars = { count = 7 }, mode = { theme = "dark" } })`; Restart goes back to these;
+  - the result has `vars` (only the variables that differ from the Design's; a per-mode change is a list of `{ value, theme }`) and `mode` (once one is switched). Steps say what ran: `"set count = 3"`, `"if count > 0: then"`, `change "Switch" to …, which sets dark = true`;
+  - problems: `div-zero`, `var-type`, `var-unknown`, `expr-invalid`, `mode-unknown`.
+  - a click whose `if` takes an empty branch (`−` at 0 in a clamp) isn't a `no-op`: the step's `notes` say `nothing changed: if cartCount > 0 was false, and that branch is empty`. Read the notes when a guard should have let the click through.
+- **Lint** warns about `var-unknown`, `var-type` (a set or binding of the wrong type; a condition that isn't true/false), `mode-unknown` and `expr-invalid`, and notes `var-unused`.
+- Play has a **Variables** popover (the values now, changed ones marked, and Reset). The HTML export plays variables too.
+
+**A cart counter.** `+` and `−` (clamped at 0 with an `if`), and a badge in the tab bar of every Screen, kept across navigation:
+
+```luau
+SetVars({ cartCount = 0 })
+local function tabBar(screen)
+  local bar = Insert(screen, { type = "frame", name = "Tab bar", x = 0, y = 764, width = 390, height = 80, fill = "#FFFFFF",
+    layout = "horizontal", justifyContent = "space_around", alignItems = "center" })
+  local shopTab = Insert(bar, { type = "text", name = "Shop tab", content = "Shop", fontSize = 15, fill = "#0F172A" })
+  local cartTab = Insert(bar, { type = "frame", name = "Cart tab", layout = "horizontal", gap = 6, alignItems = "center", children = {
+    { type = "text", name = "Label", content = "Cart", fontSize = 15, fill = "#0F172A" },
+    { type = "frame", name = "Badge", layout = "horizontal", padding = { 2, 8 }, cornerRadius = 10, fill = "#DC2626", children = {
+      { type = "text", name = "Count", content = "$cartCount", fontSize = 12, fontWeight = 700, fill = "#FFFFFF" } } } } })
+  return shopTab, cartTab
+end
+G.shop = Insert({ type = "frame", name = "Shop", x = 0, y = 6000, width = 390, height = 844, fill = "#F8FAFC", layout = "vertical", padding = 32, gap = 16 })
+G.cart = Insert({ type = "frame", name = "Cart", x = 440, y = 6000, width = 390, height = 844, fill = "#F8FAFC", layout = "vertical", padding = 32, gap = 16 })
+Insert(G.shop, { type = "frame", name = "Plus", width = 56, height = 44, cornerRadius = 10, fill = "#4F46E5",
+  interactions = { { trigger = "click", actions = { { action = "set", var = "cartCount", to = "{cartCount + 1}" } } } } })
+Insert(G.shop, { type = "frame", name = "Minus", width = 56, height = 44, cornerRadius = 10, fill = "#E2E8F0",
+  interactions = { { trigger = "click", actions = { { action = "if", cond = "{cartCount > 0}",
+    ["then"] = { { action = "set", var = "cartCount", to = "{cartCount - 1}" } } } } } } })
+for _, s in { G.shop, G.cart } do
+  local shopTab, cartTab = tabBar(s)
+  Link(shopTab, G.shop, "dissolve")
+  Link(cartTab, G.cart, "dissolve")
+end
+local run = Simulate(G.shop, { "click Plus", "click Plus", "click Plus", "click Minus", "click Cart tab" })
+assert(run.screen.name == "Cart" and run.vars.cartCount == 2, "2 in the cart, shown on Cart")
+run = Simulate(G.shop, { "click Minus", "click Plus", "restart" })
+assert(run.vars == nil, "clamped at 0, and Restart resets")
+assert(run.steps[1].notes and run.steps[1].notes[1]:find("branch is empty"), "the clamp click is a note, not a problem")
+```
+
+**A login state.** Sign in goes on only with an email and the box ticked, else an error overlay opens. `signedIn` picks the account chip (a variant bound to it) on other Screens:
+
+```luau
+SetVars({ email = "", agree = false, signedIn = false })
+local chip = MakeVariants("Account", {
+  { props = { SignedIn = false }, node = { type = "frame", name = "Account / Out", x = 2000, y = 7000, width = 96, height = 36, cornerRadius = 18, fill = "#4F46E5",
+    layout = "horizontal", justifyContent = "center", alignItems = "center",
+    children = { { type = "text", name = "Label", content = "Sign in", fontSize = 14, fontWeight = 600, fill = "#FFFFFF" } } } },
+  { props = { SignedIn = true }, node = { type = "frame", name = "Account / In", x = 2120, y = 7000, width = 36, height = 36, cornerRadius = 18, fill = "#F97316" } },
+})
+G.login = Insert({ type = "frame", name = "Login", x = 0, y = 7000, width = 390, height = 844, fill = "#FFFFFF", layout = "vertical", padding = 32, gap = 16 })
+G.welcome = Insert({ type = "frame", name = "Welcome", x = 440, y = 7000, width = 390, height = 844, fill = "#FFFFFF", layout = "vertical", padding = 32, gap = 16 })
+G.loginError = Insert({ type = "frame", name = "Login error", x = 880, y = 7000, width = 300, height = 140, cornerRadius = 16, fill = "#FFFFFF", layout = "vertical", padding = 24, gap = 12,
+  children = { { type = "text", name = "Message", content = "Enter your email and accept the terms.", width = "fill_container", fontSize = 15, fill = "#0F172A" } } })
+Link(Insert(G.loginError, { type = "text", name = "OK", content = "OK", fontSize = 15, fontWeight = 600, fill = "#4F46E5" }), "close")
+-- a click on the field stands in for typing
+Insert(G.login, { type = "frame", name = "Email", width = 326, height = 48, cornerRadius = 10, layout = "horizontal", alignItems = "center", padding = { 14, 12 }, stroke = { fill = "#CBD5E1", thickness = 1 },
+  children = { { type = "text", name = "Value", content = "$email", fontSize = 15, fill = "#0F172A" } },
+  interactions = { { trigger = "click", actions = { { action = "set", var = "email", to = "ann@example.com" } } } } })
+Insert(G.login, { type = "frame", name = "Agree", layout = "horizontal", gap = 10, alignItems = "center", children = {
+  { type = "frame", name = "Box", width = 22, height = 22, cornerRadius = 6, stroke = { fill = "#94A3B8", thickness = 2 }, children = {
+    { type = "frame", name = "Tick", x = 5, y = 5, width = 12, height = 12, cornerRadius = 3, fill = "#4F46E5", enabled = "$agree" } } },
+  { type = "text", name = "Label", content = "I accept the terms", fontSize = 15, fill = "#0F172A" } },
+  interactions = { { trigger = "click", actions = { { action = "toggle", var = "agree" } } } } })
+Insert(G.login, { type = "frame", name = "Continue", width = 326, height = 52, cornerRadius = 12, fill = "#4F46E5",
+  interactions = { { trigger = "click", actions = { { action = "if", cond = "{email != '' and agree}",
+    ["then"] = { { action = "set", var = "signedIn", to = true },
+                 { action = "navigate", to = G.welcome, transition = { type = "push", direction = "left", duration = 300, easing = "ease-out" } } },
+    ["else"] = { { action = "overlay", to = G.loginError } } } } } } })
+Insert(G.welcome, { type = "instance", ref = chip[1], name = "Account", props = { SignedIn = "$signedIn" } })
+Insert(G.welcome, { type = "text", name = "Sign out", content = "Sign out", fontSize = 15, fill = "#4F46E5",
+  interactions = { { trigger = "click", actions = { { action = "set", var = "signedIn", to = false },
+    { action = "navigate", to = G.login, transition = { type = "dissolve", duration = 300, easing = "ease-out" } } } } } })
+local run = Simulate(G.login, { "click Continue" })
+assert(run.overlays[1] and run.overlays[1].name == "Login error", "the error overlay")
+run = Simulate(G.login, { "click Continue", "click OK", "click Email", "click Agree", "click Continue" })
+local shows = {}
+for _, c in run.components or {} do shows[c.layer] = c.variant end
+assert(run.screen.name == "Welcome" and run.vars.signedIn == true and shows["Welcome/Account"] == "SignedIn=true", "signed in")
+```
+
+In Simulate, `"set email='ann@example.com'"` types for you.
+
+**A quiz score.** A right answer adds one, then every answer goes on. The last answer sets `passed` from an expression; the result shows the score and, at 4 or more, a badge:
+
+```luau
+SetVars({ score = 0, passed = false })
+G.quiz = {}
+for i = 1, 5 do
+  G.quiz[i] = Insert({ type = "frame", name = "Quiz / Q" .. i, x = (i - 1) * 440, y = 9000, width = 390, height = 844, fill = "#FFFFFF", layout = "vertical", padding = 32, gap = 16 })
+end
+G.result = Insert({ type = "frame", name = "Quiz / Result", x = 2200, y = 9000, width = 390, height = 844, fill = "#FFFFFF", layout = "vertical", padding = 32, gap = 16 })
+for i = 1, 5 do
+  local go = { action = "navigate", to = G.quiz[i + 1] or G.result, transition = { type = "push", direction = "left", duration = 300, easing = "ease-out" } }
+  local right = { { action = "set", var = "score", to = "{score + 1}" } }
+  local wrong = {}
+  if i == 5 then
+    table.insert(right, { action = "set", var = "passed", to = "{score >= 4}" })
+    table.insert(wrong, { action = "set", var = "passed", to = "{score >= 4}" })
+  end
+  table.insert(right, go)
+  table.insert(wrong, go)
+  Insert(G.quiz[i], { type = "text", name = "Question", content = "Question " .. i, fontSize = 24, fontWeight = 700, fill = "#0F172A" })
+  Insert(G.quiz[i], { type = "frame", name = "Right", width = 326, height = 52, cornerRadius = 12, fill = "#EEF2FF", interactions = { { trigger = "click", actions = right } } })
+  Insert(G.quiz[i], { type = "frame", name = "Wrong", width = 326, height = 52, cornerRadius = 12, fill = "#EEF2FF", interactions = { { trigger = "click", actions = wrong } } })
+end
+Insert(G.result, { type = "frame", name = "Score", layout = "horizontal", gap = 6, alignItems = "end", children = {
+  { type = "text", name = "Value", content = "$score", fontSize = 56, fontWeight = 700, fill = "#0F172A" },
+  { type = "text", name = "Of", content = "/ 5", fontSize = 24, fill = "#64748B" } } })
+Insert(G.result, { type = "frame", name = "Badge", layout = "horizontal", padding = { 6, 12 }, cornerRadius = 999, fill = "#DCFCE7", enabled = "$passed",
+  children = { { type = "text", name = "Label", content = "Quiz master", fontSize = 14, fontWeight = 600, fill = "#166534" } } })
+Insert(G.result, { type = "frame", name = "Play again", width = 326, height = 52, cornerRadius = 12, fill = "#4F46E5",
+  interactions = { { trigger = "click", actions = { { action = "set", var = "score", to = 0 }, { action = "set", var = "passed", to = false },
+    { action = "navigate", to = G.quiz[1], transition = { type = "dissolve", duration = 300, easing = "ease-out" } } } } } })
+local run = Simulate(G.quiz[1], { "click Right", "click Right", "click Wrong", "click Right", "click Right" })
+assert(run.screen.name == "Quiz / Result" and run.vars.score == 4 and run.vars.passed == true, "4 / 5 with the badge")
+run = Simulate(G.quiz[1], { "click Right", "click Wrong", "click Wrong", "click Right", "click Wrong" })
+assert(run.vars.score == 2 and run.vars.passed == nil, "2 / 5, no badge")
+run = Simulate(G.quiz[1], { "click Right", "click Right", "click Right", "click Right", "click Right", "click Play again" })
+assert(run.screen.name == "Quiz / Q1" and run.vars == nil, "play again")
+```
+
+**A dark mode toggle.** The switch's `On` is bound to `dark`, and each member's click is a Change to then a `mode` action, so the switch and the mode always agree. One card is pinned to light:
+
+```luau
+SetThemes("theme", { "light", "dark" })
+SetVars({
+  dark = false,
+  surface = { { value = "#F8FAFC", theme = { theme = "light" } }, { value = "#0B1220", theme = { theme = "dark" } } },
+  ink = { { value = "#0F172A", theme = { theme = "light" } }, { value = "#F1F5F9", theme = { theme = "dark" } } },
+  panel = { { value = "#FFFFFF", theme = { theme = "light" } }, { value = "#1E293B", theme = { theme = "dark" } } },
+})
+local sw = MakeVariants("Dark switch", {
+  { props = { On = false }, node = { type = "frame", name = "Dark switch / Off", x = 2000, y = 8000, width = 52, height = 32, cornerRadius = 16, fill = "#CBD5E1",
+    children = { { type = "ellipse", name = "Knob", x = 3, y = 3, width = 26, height = 26, fill = "#FFFFFF" } } } },
+  { props = { On = true }, node = { type = "frame", name = "Dark switch / On", x = 2080, y = 8000, width = 52, height = 32, cornerRadius = 16, fill = "#22C55E",
+    children = { { type = "ellipse", name = "Knob", x = 23, y = 3, width = 26, height = 26, fill = "#FFFFFF" } } } },
+})
+local quick = { type = "smart", easing = "quick" }
+Update(sw[1], { interactions = { { trigger = "click", actions = {
+  { action = "changeTo", to = sw[2], transition = quick }, { action = "mode", axis = "theme", value = "dark" } } } } })
+Update(sw[2], { interactions = { { trigger = "click", actions = {
+  { action = "changeTo", to = sw[1], transition = quick }, { action = "mode", axis = "theme", value = "light" } } } } })
+G.appearance = Insert({ type = "frame", name = "Appearance", x = 0, y = 8000, width = 390, height = 844, fill = "$surface", layout = "vertical", padding = 32, gap = 16 })
+Insert(G.appearance, { type = "frame", name = "Row", width = 326, layout = "horizontal", justifyContent = "space_between", alignItems = "center", children = {
+  { type = "text", name = "Label", content = "Dark mode", fontSize = 16, fill = "$ink" },
+  { type = "instance", ref = sw[1], name = "Dark switch", props = { On = "$dark" } } } })
+Insert(G.appearance, { type = "frame", name = "Card", width = 326, height = 100, cornerRadius = 16, fill = "$panel" })
+Insert(G.appearance, { type = "frame", name = "Light card", width = 326, height = 100, cornerRadius = 16, fill = "$panel", theme = { theme = "light" } })
+local run = Simulate(G.appearance, { "click Dark switch" })
+assert(run.mode.theme == "dark" and run.vars.dark == true, "dark")
+run = Simulate(G.appearance, { "click Dark switch", "click Dark switch" })
+assert(run.mode.theme == "light" and run.vars == nil, "and back")
+assert(Eval("panel", nil, { mode = { theme = "dark" } }) == "#1E293B", "the card's dark colour")
+```
+
+A `"mode theme=dark"` step switches only the mode; set `dark` too (`"set dark=true"`) to keep the switch in step.
+
+## Checking
+
+```luau
+TakeScreenshot(G.cta, { state = "hover" })
+TakeScreenshot(G.cta, { state = "press" })
+```
+
+- A state screenshot shows the layer as it looks hovered or pressed. A layer inside a hovered parent shows the parent's state.
+- **Heed these warnings:**
+  - `broken-link`: the target was deleted, or isn't a Screen;
+  - `nested-link`;
+  - `dead-end`: a Screen you can reach but not leave. It's checked when the Design has flows, and is fine on a last "Done" Screen;
+  - `state-target`: a `descendants` key that matches no layer;
+  - `smart-fallback`;
+  - `duplicate-trigger` and `motion-reserved` (see Triggers);
+  - `spring-duration`: a duration given with a spring (see Easing);
+  - `var-unknown`, `var-type`, `mode-unknown`, `expr-invalid` and `var-unused` (see Variables);
+  - `scroll-fits`, `scroll-fixed`, `scroll-sticky` and `scroll-target` (see Scrolling).
+- **Find links:** `FindAll(function(n, info) return info.links ~= nil end)`. `info.links` lists the Screens a layer links to.
+
+## The full shapes
+
+These are what `Get` returns and `Update` takes:
+
+```luau
+Update(G.back, { interactions = { { trigger = "click", actions = {
+  { action = "back", transition = { type = "slideOut", direction = "down", duration = 250, easing = "ease-in" } } } } } })
+```
+
+- `interactions = { { trigger = "click" | { type = …, … }, actions = { … } } }`. Every action runs, in order. An action is one of:
+  - `{ action = "navigate", to = id, transition? }`;
+  - `{ action = "back", transition? }`;
+  - `{ action = "url", url, newTab = true }`;
+  - `{ action = "scrollTo", to = layerId, offset?, transition? }` (see Scrolling);
+  - `{ action = "changeTo", to = memberId, transition? }` (see Interactive components);
+  - `{ action = "overlay", to = id, position?, transition? }`, `{ action = "swap", to = id }`, `{ action = "close" }`;
+  - `{ action = "set", var, to }`, `{ action = "toggle", var }`, `{ action = "mode", axis, value }`, `{ action = "if", cond, ["then"] = { … }, ["else"] = { … } }` (see Variables);
+  - `{ action = "motion", play = id }` (reserved).
+- A navigate may have `resetComponents = true`: the Screen's interactive components start at their own variants.
+- `transition = { type = "push", direction = "left", duration = 300, easing = "ease-out" }`. Types: `instant`, `dissolve`, `moveIn`, `moveOut`, `push`, `slideIn`, `slideOut` and `smart` (Smart Animate: layers with the same name tween). `duration` is 0–10,000 ms; `easing` as in Easing.
+
+## Export
+
+`Export({ format = "html", prototype = true })` writes one clickable page:
+
+- each Screen is a section;
+- links are real links (`<a href="#screen">`), with their transitions;
+- Back is the browser's Back;
+- with JavaScript off, the links still jump between Screens.
+
+Hover and press states are in every HTML export, as CSS `:hover` and `:active`.
+]]
+
+M.ORDER = { "components", "design-systems", "landing-pages", "mobile-apps", "web-apps", "slides", "tables", "code", "tailwind", "prototyping" }
 
 return M

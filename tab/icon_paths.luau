@@ -44,6 +44,7 @@ return {
 	layers = "<path d=\"M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z\"/><path d=\"M22 17.65l-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65\"/><path d=\"M22 12.65l-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65\"/>",
 	rows = "<rect x=\"3\" y=\"3\" width=\"18\" height=\"7\" rx=\"1.5\"/><rect x=\"3\" y=\"14\" width=\"18\" height=\"7\" rx=\"1.5\"/>",
 	cols = "<rect x=\"3\" y=\"3\" width=\"7\" height=\"18\" rx=\"1.5\"/><rect x=\"14\" y=\"3\" width=\"7\" height=\"18\" rx=\"1.5\"/>",
+	smartphone = "<rect width=\"14\" height=\"20\" x=\"5\" y=\"2\" rx=\"2\" ry=\"2\"/><path d=\"M12 18h.01\"/>",
 	eye = "<path d=\"M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/>",
 	eyeOff = "<path d=\"M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68\"/><path d=\"M6.61 6.61A13.53 13.53 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61\"/><path d=\"M14.12 14.12a3 3 0 1 1-4.24-4.24\"/><path d=\"m2 2 20 20\"/>",
 	lock = "<rect x=\"4\" y=\"11\" width=\"16\" height=\"10\" rx=\"2\"/><path d=\"M8 11V7a4 4 0 0 1 8 0v4\"/>",
@@ -97,4 +98,14 @@ return {
 	folder = "<path d=\"M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2z\"/>",
 	link = "<path d=\"M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71\"/><path d=\"M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71\"/>",
 	swap = "<path d=\"M16 3h5v5M21 3l-7 7M8 21H3v-5M3 21l7-7\"/>",
+	-- (Lucide, for prototyping: play, arrow-left, external-link, mouse-pointer-click, workflow.)
+	play = "<path d=\"M6 3.8v16.4a1 1 0 0 0 1.5.86l13.6-8.2a1 1 0 0 0 0-1.72L7.5 2.94A1 1 0 0 0 6 3.8z\"/>",
+	arrowLeft = "<path d=\"M19 12H5M12 19l-7-7 7-7\"/>",
+	external = "<path d=\"M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6\"/>",
+	click = "<path d=\"M14 4.1 12 6M5.1 8l-2.9-.8M6 12l-1.9 2M7.2 2.2 8 5.1\"/><path d=\"M9.04 9.6a.5.5 0 0 1 .56-.56l11 4.6a.5.5 0 0 1-.06.95l-4.2 1.1a2 2 0 0 0-1.43 1.43l-1.1 4.2a.5.5 0 0 1-.95.06z\"/>",
+	flow = "<rect x=\"3\" y=\"3\" width=\"8\" height=\"8\" rx=\"2\"/><path d=\"M7 11v4a2 2 0 0 0 2 2h4\"/><rect x=\"13\" y=\"13\" width=\"8\" height=\"8\" rx=\"2\"/>",
+	-- (Lucide, for Play's bar, step 6 P1: sliders-horizontal, chevron-left, chevron-right.)
+	sliders = "<path d=\"M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4\"/>",
+	chevLeft = "<path d=\"m15 18-6-6 6-6\"/>",
+	chevRight = "<path d=\"m9 18 6-6-6-6\"/>",
 }

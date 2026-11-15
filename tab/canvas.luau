@@ -29,6 +29,10 @@ local ui = require("./pointer").ui
 local Draw = require("./draw")
 local Model = require("./model")
 local Look = require("./look")
+local Noodles = require("./noodles")
+local IaClip = require("./ia_clip")
+local Toast = require("./toast")
+local Kit = require("./kit")
 
 local ZOOM_MIN, ZOOM_MAX = 0.02, 25
 local BOARD_STEP = 256
@@ -103,7 +107,7 @@ local function fmt(v: number): string
 	return tostring(r)
 end
 
-return function(props: { source: Source, id: string?, expose: ((api: any) -> ())?, log: ((string) -> ())?, hover: any?, tool: any?, chrome: boolean?, context_menu: ((ids: { string }, x: number, y: number) -> { Node }?)?, menu_style: any?, insets: (() -> { l: number, t: number, r: number, b: number })?, on_find: (() -> ())?, on_palette: (() -> ())?, on_shortcuts: (() -> ())? }): Node
+return function(props: { source: Source, id: string?, expose: ((api: any) -> ())?, log: ((string) -> ())?, hover: any?, tool: any?, chrome: boolean?, proto: (() -> boolean)?, show_all: any?, context_menu: ((ids: { string }, x: number, y: number) -> { Node }?)?, menu_style: any?, insets: (() -> { l: number, t: number, r: number, b: number })?, on_find: (() -> ())?, on_palette: (() -> ())?, on_shortcuts: (() -> ())?, on_panel_tab: (() -> ())?, on_preview: (() -> ())? }): Node
 	local source = props.source
 	local roots = source.roots
 	local selection = source.selection
@@ -145,6 +149,8 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 	local surface = ui.ref()
 	local field_focused = false
 	local draw_done: (d: any) -> ()
+	local link_done: (d: any) -> ()
+	local rewrite_links: (keys: { any }, to: string?, label: string) -> ()
 	local eyedrop_done: ((hex: string) -> ())? = nil
 	local color_at: (x: number, y: number) -> string?
 	local finish_pen: (closed: boolean) -> ()
@@ -303,6 +309,69 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 	end
 	local function has(list: { string }, id: string): boolean
 		return table.find(list, id) ~= nil
+	end
+
+	-- Selected interactions (F6 C1: noodles you can grab): `{ { id, k } }`
+	-- (noodles.luau), kept with the layer selection they were picked in, so
+	-- a new layer selection clears them. The service's `ia_sel` when it has
+	-- one, else the Canvas's own (the harness's fixture).
+	local ia_sel = (source :: any).ia_sel or ui.state(`canvas.{tab_id}.ia_sel`, { key = "", list = {} } :: any)
+	local function sel_key(ids: { string }?): string
+		return table.concat(ids or selection:peek() or {}, ",")
+	end
+	local function ia_list(): { any }
+		local v = ia_sel:peek()
+		if type(v) == "table" and v.key == sel_key() then
+			return v.list or {}
+		end
+		return {}
+	end
+	local function set_ia(list: { any })
+		local was = ia_list()
+		if #was == 0 and #list == 0 then
+			return
+		end
+		ia_sel:set({ key = sel_key(), list = list })
+	end
+	local noodle_confirm = ui.use_state(false) -- (the right-click's "Remove all interactions" submenu)
+	local function ia_has(list: { any }, id: string, k: number): number?
+		for at, x in list do
+			if x.id == id and x.k == k then
+				return at
+			end
+		end
+		return nil
+	end
+	-- The noodles drawn for a layer selection (`ids`), cached per roots,
+	-- selection, zoom and "show all".
+	local noodle_cache: any = { key = nil, list = {} }
+	local function noodles_for(ids: { string }): { any }
+		local v = view:peek()
+		if not v then
+			return {}
+		end
+		local show_all = props.show_all and props.show_all:peek() or false
+		local key = `{roots.rev}|{sel_key(ids)}|{v.zoom}|{show_all}`
+		if noodle_cache.key == key then
+			return noodle_cache.list
+		end
+		local i = ix:peek()
+		local in_sel: { [string]: boolean } = {}
+		for _, id in ids do
+			in_sel[id] = true
+		end
+		local list = Noodles.collect(roots:peek(), i.by, v.zoom, function(id: string): boolean
+			local n = i.by[id]
+			while n do
+				if in_sel[n.id] then
+					return true
+				end
+				n = if n.parent ~= "" then i.by[n.parent] else nil
+			end
+			return false
+		end, show_all)
+		noodle_cache = { key = key, list = list }
+		return list
 	end
 
 	-- A node's kind for its colour: a Component, an Instance (or inside one).
@@ -923,6 +992,28 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 	local function marquee_to(d: Drag, x: number, y: number, e: any)
 		local i = ix:peek()
 		local r = { math.min(d.px, x), math.min(d.py, y), math.abs(x - d.px), math.abs(y - d.py) }
+		if d.noodles then
+			local hit = Noodles.in_rect(d.noodles, r)
+			if #hit > 0 then
+				-- (noodles win: the layer selection stays as it was)
+				if sel_key() ~= sel_key(d.start) then
+					select(d.start)
+				end
+				local list = table.clone(d.ia0)
+				for _, l in hit do
+					if not ia_has(list, l.id, l.k) then
+						table.insert(list, { id = l.id, k = l.k })
+					end
+				end
+				set_ia(list)
+				d.took_noodles = true
+				shown:set({ kind = "marquee", rect = r })
+				return
+			elseif d.took_noodles then
+				d.took_noodles = false
+				set_ia(d.ia0)
+			end
+		end
 		local found = {}
 		if e.ctrl or e.cmd then
 			for _, id in i.order do
@@ -1189,6 +1280,32 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			draw_done(d)
 			return
 		end
+		if d.kind == "link" then
+			link_done(d)
+			return
+		end
+		if d.kind == "noodle" then
+			return -- (a click: picked at the press)
+		end
+		if d.kind == "retarget" then
+			local keys = {}
+			for _, l in d.links or {} do
+				table.insert(keys, { id = l.id, k = l.k })
+			end
+			if d.part == "end" and d.target then
+				rewrite_links(keys, d.target, "Retarget link")
+			elseif d.part == "end" then
+				rewrite_links(keys, nil, "Remove link")
+			else
+				-- (the start dragged off its layer removes; back onto it, nothing)
+				local b = d.link.b
+				local back_on = d.cx and d.cx >= b[1] and d.cx <= b[1] + b[3] and d.cy >= b[2] and d.cy <= b[2] + b[4]
+				if not back_on then
+					rewrite_links(keys, nil, "Remove link")
+				end
+			end
+			return
+		end
 		if d.kind == "press" and not d.moved and d.click and not d.shift then
 			local s = sel()
 			if not (#s == 1 and s[1] == d.click) then
@@ -1288,6 +1405,11 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			d.scope = if n then n.id else ""
 			d.screen = if n then n.id else nil
 			d.start = table.clone(s)
+			-- (Prototype tab, from empty canvas: it takes the noodles it crosses.)
+			if not n and props.proto ~= nil and (props.proto :: any)() then
+				d.noodles = noodles_for(s)
+				d.ia0 = if d.shift then table.clone(ia_list()) else {}
+			end
 			return
 		end
 		if d.shift and id then
@@ -1316,10 +1438,215 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		d.kind, d.id = "press", id
 	end
 
+	-- Prototyping: the + handle on the selected layer's right edge, which
+	-- drags out a link to a Screen (proto-step1-spec §6), while the
+	-- properties show the Prototype tab.
+	local function proto_on(): boolean
+		return props.proto ~= nil and (props.proto :: any)()
+	end
+	local function link_handle(): (number?, number?, string?)
+		if not proto_on() then
+			return nil, nil, nil
+		end
+		local s = sel()
+		local v = view:peek()
+		if #s ~= 1 or not v then
+			return nil, nil, nil
+		end
+		local n = ix:peek().by[s[1]]
+		if not n then
+			return nil, nil, nil
+		end
+		local b = n.bounds
+		return v.x + (b[1] + b[3]) * v.zoom, v.y + (b[2] + b[4] / 2) * v.zoom, n.id
+	end
+	local function on_link_handle(lx: number, ly: number): string?
+		local hx, hy, id = link_handle()
+		if hx and hy and math.abs(lx - hx) <= 9 and math.abs(ly - hy) <= 9 then
+			return id
+		end
+		return nil
+	end
+	-- The Screen (top-level frame, not a Component) under a Canvas point.
+	local function screen_at(cx: number, cy: number, except: string?): string?
+		local i = ix:peek()
+		local found = nil
+		for _, id in i.kids[""] or {} do
+			local n = i.by[id]
+			if n and n.it.t == "frame" and not n.it.comp and id ~= except and Model.inside(n, cx, cy) then
+				found = id
+			end
+		end
+		return found
+	end
+	local function root_id_of(id: string): string?
+		local i = ix:peek()
+		local n = i.by[id]
+		while n and n.parent ~= "" and i.by[n.parent] do
+			n = i.by[n.parent]
+		end
+		return if n then n.id else nil
+	end
+	function link_done(d: any)
+		local target = d.target
+		if not target then
+			return
+		end
+		local node_of = (source :: any).node
+		if not node_of then
+			return
+		end
+		node_of(d.from, function(info: any?)
+			if not info then
+				return
+			end
+			local function copy(v: any): any
+				if type(v) ~= "table" then
+					return v
+				end
+				local o = {}
+				for k, x in v do
+					o[k] = copy(x)
+				end
+				return o
+			end
+			local own = info.node and info.node.interactions
+			local list = copy(own or (info.resolved and info.resolved.interactions) or {})
+			if type(list) ~= "table" then
+				list = {}
+			end
+			table.insert(list, { trigger = "click", actions = { { action = "navigate", to = target, transition = { type = "dissolve", duration = 300, easing = "ease-out" } } } })
+			send({ { op = "update", id = d.from, props = { interactions = list } } }, "Add link")
+		end)
+	end
+	-- Noodles (`{ id, k }` each) retargeted to a Screen (`to`), or removed
+	-- (`to` nil): one `update` of each layer's interactions, one undo step.
+	-- A back or url link keeps its action on a retarget.
+	function rewrite_links(keys: { any }, to: string?, label: string)
+		local node_of = (source :: any).node
+		if not node_of or #keys == 0 then
+			return
+		end
+		local by_id: { [string]: { number } } = {}
+		local order: { string } = {}
+		for _, x in keys do
+			if not by_id[x.id] then
+				by_id[x.id] = {}
+				table.insert(order, x.id)
+			end
+			table.insert(by_id[x.id], x.k)
+		end
+		local infos: { [string]: any } = {}
+		local left = #order
+		for _, id in order do
+			node_of(id, function(info: any?)
+				infos[id] = info or false
+				left -= 1
+				if left > 0 then
+					return
+				end
+				local ops = {}
+				for _, lid in order do
+					local inf = infos[lid]
+					if inf then
+						local own = inf.node and inf.node.interactions
+						local stored = own or (inf.resolved and inf.resolved.interactions) or {}
+						local list, changed = Noodles.rewrite(stored, by_id[lid], to)
+						if changed > 0 then
+							-- (none left: "__null"; an Instance whose Component has
+							-- some keeps an empty list of its own, or they'd come back)
+							local value: any = list
+							if #list == 0 then
+								value = if own == nil then {} else "__null"
+							end
+							table.insert(ops, { op = "update", id = lid, props = { interactions = value } })
+						end
+					end
+				end
+				if props.log then
+					props.log(`{label}: {#ops} layers{if to then " to " .. to else ""}`)
+				end
+				send(ops, label)
+				if not to then
+					set_ia({})
+				end
+			end)
+		end
+	end
+
 	local function on_press(e: any)
 		local v = view:peek()
 		if not v then
 			return
+		end
+		do
+			local moving = tool:peek() == "move" and not space and not editing:peek()
+			-- A noodle under the pointer (Prototype tab): a click selects it
+			-- (Shift adds or takes away), its ends drag.
+			local nh = nil
+			if moving and proto_on() then
+				local ncx, ncy = to_canvas(e.local_x, e.local_y)
+				nh = Noodles.hit(noodles_for(sel()), ncx, ncy, v.zoom)
+			end
+			local from = if tool:peek() == "move" and not space then on_link_handle(e.local_x, e.local_y) else nil
+			-- (The + handle sits where a noodle starts: it wins, unless that
+			-- noodle is selected.)
+			if nh and (not from or (nh.part == "start" and ia_has(ia_list(), nh.link.id, nh.link.k))) then
+				local l = nh.link
+				local list = table.clone(ia_list())
+				local at = ia_has(list, l.id, l.k)
+				if e.shift then
+					if at then
+						table.remove(list, at)
+					else
+						table.insert(list, { id = l.id, k = l.k })
+					end
+					set_ia(list)
+				elseif not at then
+					set_ia({ { id = l.id, k = l.k } })
+				end
+				drag = {
+					kind = "noodle",
+					part = nh.part,
+					link = l,
+					from_x = e.local_x,
+					from_y = e.local_y,
+					at_x = e.local_x,
+					at_y = e.local_y,
+					px = 0,
+					py = 0,
+					shift = e.shift,
+					alt = false,
+					deep = false,
+					moved = false,
+				}
+				local el0 = surface:peek()
+				if el0 then
+					el0:focus()
+				end
+				return
+			end
+			if not e.shift then
+				set_ia({})
+			end
+			if from then
+				drag = {
+					kind = "link",
+					from = from,
+					from_x = e.local_x,
+					from_y = e.local_y,
+					at_x = e.local_x,
+					at_y = e.local_y,
+					px = 0,
+					py = 0,
+					shift = false,
+					alt = false,
+					deep = false,
+					moved = false,
+				}
+				cursor:set("crosshair")
+				return
+			end
 		end
 		local el = surface:peek()
 		local ed = editing:peek()
@@ -1449,7 +1776,7 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 
 	-- Script time of each pointer move and each overlay draw (ms), the last
 	-- 600 of each, for the harness's perf numbers.
-	local perf = { move = {} :: { number }, overlay = {} :: { number }, items = {} :: { number } }
+	local perf = { move = {} :: { number }, overlay = {} :: { number }, items = {} :: { number }, noodles = {} :: { number } }
 	local function note(list: { number }, ms: number)
 		table.insert(list, ms)
 		if #list > 600 then
@@ -1475,7 +1802,19 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			end
 			local z = if not space then zone_at(e.local_x, e.local_y) else nil
 			local t = tool:peek()
-			cursor:set(if space or t == "hand" then "grab" elseif t == "eyedrop" then "crosshair" elseif t ~= "move" then "crosshair" elseif z then zone_cursor(z) else "default")
+			local on_handle = t == "move" and not space and on_link_handle(e.local_x, e.local_y) ~= nil
+			if not on_handle and not z and t == "move" and not space and proto_on() then
+				local ncx, ncy = to_canvas(e.local_x, e.local_y)
+				local nh = Noodles.hit(noodles_for(sel()), ncx, ncy, v.zoom)
+				if nh then
+					cursor:set(if nh.part == "line" then "pointer" else "grab")
+					if hover:peek() ~= nil then
+						hover:set(nil)
+					end
+					return
+				end
+			end
+			cursor:set(if space or t == "hand" then "grab" elseif t == "eyedrop" then "crosshair" elseif t ~= "move" then "crosshair" elseif on_handle then "crosshair" elseif z then zone_cursor(z) else "default")
 			local cx, cy = to_canvas(e.local_x, e.local_y)
 			local held = ui.modifiers
 			local h = label_at(e.local_x, e.local_y) or Model.hit(ix:peek(), cx, cy, sel(), held.control:peek() or held.meta:peek(), nil)
@@ -1493,6 +1832,39 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		d.moved = true
 		if d.kind == "pan" then
 			pan(mx, my)
+			return
+		end
+		if d.kind == "link" then
+			local cx, cy = to_canvas(e.local_x, e.local_y)
+			d.target = screen_at(cx, cy, root_id_of(d.from))
+			shown:set({ kind = "link", from = d.from, x = e.local_x, y = e.local_y, target = d.target })
+			return
+		end
+		if d.kind == "noodle" then
+			if d.part == "line" then
+				return
+			end
+			-- An end dragged: every selected noodle goes with it (the one
+			-- grabbed among them).
+			local list = ia_list()
+			if not ia_has(list, d.link.id, d.link.k) then
+				list = { { id = d.link.id, k = d.link.k } }
+				set_ia(list)
+			end
+			local links = {}
+			for _, l in noodles_for(sel()) do
+				if ia_has(list, l.id, l.k) and l.kind ~= "back" and l.kind ~= "url" then
+					table.insert(links, l)
+				end
+			end
+			d.kind, d.links = "retarget", links
+			cursor:set("grabbing")
+		end
+		if d.kind == "retarget" then
+			local cx, cy = to_canvas(e.local_x, e.local_y)
+			d.cx, d.cy = cx, cy
+			d.target = if d.part == "end" then screen_at(cx, cy, nil) else nil
+			shown:set({ kind = "retarget", part = d.part, links = d.links, x = cx, y = cy, target = d.target })
 			return
 		end
 		local held = ui.modifiers
@@ -1559,6 +1931,26 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		send(ops, "Move")
 	end
 
+	-- (F6 C3) The interaction clipboard appended to each selected layer (one
+	-- edit); destinations not in the Design are left out, said in a toast.
+	local function paste_interactions()
+		local ids = table.clone(sel())
+		if #ids == 0 then
+			Toast.show { icon = "info", title = "Select a layer to paste the interactions on" }
+			return
+		end
+		IaClip.paste(source, ids, {
+			say = function(title: string, body: string?)
+				Toast.show { icon = "alert", title = title, body = body }
+			end,
+			done = function(n: number, dropped: { string })
+				if props.log then
+					props.log(`Paste interactions: {n} layers, {#dropped} left out`)
+				end
+			end,
+		})
+	end
+
 	local function on_key(k: any): boolean?
 		if k.editing then
 			return nil
@@ -1566,6 +1958,11 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		local key = k.key
 		local s = sel()
 		local i = ix:peek()
+		-- (F6 P4) Shift+Space: the shell's inline Preview, not a pan
+		if key == " " and k.shift and not k.cmd and props.on_preview and not space then
+			props.on_preview()
+			return true
+		end
 		if key == " " then
 			if not space then
 				space = true
@@ -1617,22 +2014,53 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			select(table.clone(i.kids[parent] or {}))
 			return true
 		end
+		-- (F6 C3) Selected interactions (noodles, or a row picked in the
+		-- Prototype panel): Ctrl+C / X copy them to the tab's interaction
+		-- clipboard (ia_clip.luau), a cut removing them in one edit.
+		if k.cmd and not k.shift and (key == "c" or key == "C" or key == "x" or key == "X") and proto_on() and #ia_list() > 0 then
+			local keys = table.clone(ia_list())
+			local cut = key == "x" or key == "X"
+			IaClip.records(source, keys, function(recs: { any })
+				if #recs == 0 then
+					return
+				end
+				IaClip.put(recs)
+				if props.log then
+					props.log(`{if cut then "Cut" else "Copy"} interactions: {#recs}`)
+				end
+				if cut then
+					rewrite_links(keys, nil, "Cut interactions")
+				end
+			end)
+			return true
+		end
 		-- Copy, cut, paste (the service's clipboard): a paste goes into the
 		-- selected frame, or beside the selection, or where it was copied.
 		if k.cmd and not k.shift and (key == "c" or key == "C" or key == "x" or key == "X") and #s > 0 and source.copy then
 			local cut = key == "x" or key == "X"
 			source.copy(Model.topmost(i, s), cut)
+			IaClip.layers_copied()
 			if cut then
 				select({})
 			end
 			return true
 		end
 		if k.cmd and not k.shift and (key == "v" or key == "V") then
+			-- (F6 C3) interactions copied last: appended to each selected layer
+			if IaClip.newer() then
+				paste_interactions()
+				return true
+			end
 			send({ { op = "paste", into = if #s == 1 then s[1] else nil } }, "Paste")
 			return true
 		end
 		if k.cmd and (key == "d" or key == "D") and #s > 0 then
 			send({ { op = "duplicate", ids = Model.topmost(i, s) } }, "Duplicate")
+			return true
+		end
+		-- Selected noodles: Delete removes their interactions (not the layers).
+		if (key == "Delete" or key == "Backspace") and proto_on() and #ia_list() > 0 then
+			rewrite_links(table.clone(ia_list()), nil, "Remove link")
 			return true
 		end
 		if (key == "Delete" or key == "Backspace") and #s > 0 then
@@ -1666,6 +2094,11 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			finish_pen(false)
 			return true
 		end
+		-- Shift+E: the properties' Design | Prototype tab (Figma's), opening them.
+		if k.shift and not k.cmd and not k.alt and (key == "E" or key == "e") and props.on_panel_tab then
+			props.on_panel_tab()
+			return true
+		end
 		if not k.cmd and not k.alt then
 			local tools = { v = "move", h = "hand", f = "frame", r = "rectangle", o = "ellipse", l = "line", t = "text", p = "pen" }
 			local tk = tools[string.lower(key)]
@@ -1678,12 +2111,17 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			tool:set("move")
 			return true
 		end
+		if key == "Escape" and #ia_list() > 0 then
+			set_ia({})
+			return true
+		end
 		-- (pen: Escape clears the selection; Shift+Enter is the parent.)
 		if key == "Escape" then
 			select({})
 			return true
 		end
-		if key == "Enter" and #s > 0 then
+		-- (not Ctrl+Enter: that's the shell's Play; F6 P4)
+		if key == "Enter" and #s > 0 and not k.cmd then
 			if k.shift then
 				local n = i.by[s[1]]
 				if n and n.parent ~= "" then
@@ -1981,6 +2419,113 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			local label = if sh and sh.kind == "rotate" and sh.angle then `{sh.angle}°` else `{fmt(f.w)} × {fmt(f.h)}`
 			pill(sx(bx + bw / 2), sy(by + bh) + 8, label, col, L.on_accent, "middle", false)
 		end
+		-- Prototype links ("noodles"), flows' tags, the + handle.
+		if proto_on() then
+			local t0 = os.clock()
+			-- (what the noodles depend on, read to redraw when it changes)
+			local _ = props.show_all and props.show_all:get()
+			local _ = roots:get()
+			local _ = ia_sel:get()
+			local picked = ia_list()
+			local function arrow(x: number, y: number, dir: number, col: string)
+				c:fill(ui.path():move(x, y):line(x - dir * 7, y - 4.5):line(x - dir * 7, y + 4.5):close(), col)
+			end
+			local function dot(x: number, y: number, col: string, r: number)
+				c:rect(x - r, y - r, 2 * r, 2 * r, L.handle, r)
+				c:stroke(ui.path():ellipse(x - r, y - r, 2 * r, 2 * r), col, 1.5)
+			end
+			-- (a noodle being dragged by an end: drawn faint where it was)
+			local dragging: { [any]: boolean } = {}
+			if sh and sh.kind == "retarget" then
+				for _, l in sh.links do
+					dragging[l] = true
+				end
+			end
+			for _, l in noodles_for(s) do
+				local a = l.a
+				local chosen = ia_has(picked, l.id, l.k) ~= nil
+				local col = if a.broken then L.guide else L.accent
+				if not l.on and not chosen then
+					col = Draw.fade(col .. "ff", 0.35)
+				end
+				if dragging[l] then
+					col = Draw.fade(col .. "ff", 0.3)
+				end
+				local width = if chosen then 2.5 else 1.5
+				if l.kind == "back" or l.kind == "url" then
+					local x, y = sx(l.x0), sy(l.y0)
+					if chosen then
+						c:rect(x - 10, y - 10, 20, 20, Draw.fade(L.accent .. "ff", 0.25), 10)
+					end
+					c:rect(x - 8, y - 8, 16, 16, col, 8)
+					c:text(if l.kind == "back" then "←" else "↗", x, y + 0.5, { size = 10, weight = 700, font = Look.UI, color = L.on_accent, align = "center", baseline = "middle" })
+				elseif l.kind == "missing" then
+					local x, y = sx(l.x0), sy(l.y0)
+					c:line(x, y, x + 28, y, col, width)
+					c:stroke(ui.path():ellipse(x - 3, y - 3, 6, 6), col, 1.5)
+					pill(x + 32, y - 9, "Missing Screen", col, L.on_accent, "start", false)
+					if chosen then
+						dot(x + 28, y, col, 4.5)
+					end
+				else
+					local x0, y0, x1, y1 = sx(l.x0), sy(l.y0), sx(l.x1), sy(l.y1)
+					c:stroke(ui.path():move(x0, y0):cubic(sx(l.c1x), sy(l.c1y), sx(l.c2x), sy(l.c2y), sx(l.ex), sy(l.ey)), col, width, if l.ov then { dash = { 5, 4 } } else nil)
+					arrow(x1, y1, l.dir, col)
+					-- (selected: handles at both ends, Figma's)
+					dot(x0, y0, col, if chosen then 4.5 else 3.5)
+					if chosen then
+						dot(x1, y1, col, 4.5)
+					end
+				end
+			end
+			-- An end being dragged: each noodle from its start to the pointer
+			-- (or from the pointer to its end), the Screen it would go to.
+			if sh and sh.kind == "retarget" then
+				if sh.target and i.by[sh.target] then
+					local tn = i.by[sh.target]
+					outline(tn.m, tn.it.box.w, tn.it.box.h, L.accent, 2)
+				end
+				local col = if sh.part == "end" and not sh.target then L.guide else L.accent
+				for _, l in sh.links do
+					local q = if sh.part == "end" then Noodles.free(l.x0, l.y0, sh.x, sh.y, v.zoom) else Noodles.free(sh.x, sh.y, l.x1, l.y1, v.zoom)
+					c:stroke(ui.path():move(sx(q[1]), sy(q[2])):cubic(sx(q[3]), sy(q[4]), sx(q[5]), sy(q[6]), sx(q[7]), sy(q[8])), col, 2, if l.ov then { dash = { 5, 4 } } else nil)
+				end
+				dot(sx(sh.x), sy(sh.y), col, 4.5)
+			end
+			-- Flows: "▶ name" over each start.
+			for _, f in (source :: any).flows and (source :: any).flows:get() or {} do
+				local n = i.by[f.start]
+				if n then
+					local b = n.bounds
+					pill(sx(b[1] + b[3]), sy(b[2]) - 24, `▶ {f.name}`, L.accent, L.on_accent, "end", false)
+				end
+			end
+			-- A link being dragged out: its curve, the Screen it would go to.
+			if sh and sh.kind == "link" then
+				local n = i.by[sh.from]
+				if sh.target and i.by[sh.target] then
+					local tn = i.by[sh.target]
+					outline(tn.m, tn.it.box.w, tn.it.box.h, L.accent, 2)
+				end
+				if n then
+					local b = n.bounds
+					local x0, y0 = sx(b[1] + b[3]), sy(b[2] + b[4] / 2)
+					local x1, y1 = sh.x, sh.y
+					local dir = if x1 >= x0 then 1 else -1
+					local k = math.max(30, math.abs(x1 - x0) / 2)
+					c:stroke(ui.path():move(x0, y0):cubic(x0 + dir * k, y0, x1 - dir * k, y1, x1, y1), L.accent, 1.5)
+					c:rect(x1 - 3, y1 - 3, 6, 6, L.accent, 3)
+				end
+			end
+			local hx, hy = link_handle()
+			if hx and hy and not (sh and sh.kind ~= "link") then
+				c:rect(hx - 7, hy - 7, 14, 14, L.handle, 7)
+				c:stroke(ui.path():ellipse(hx - 7, hy - 7, 14, 14), L.accent, 1.5)
+				c:line(hx - 3.5, hy, hx + 3.5, hy, L.accent, 1.5)
+				c:line(hx, hy - 3.5, hx, hy + 3.5, L.accent, 1.5)
+			end
+			note(perf.noodles, (os.clock() - t0) * 1000)
+		end
 		-- Guides, and Alt's measurements.
 		local g = if sh then sh.guides else nil
 		if not g and measuring and #s > 0 and not sh then
@@ -2172,6 +2717,15 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			key = function(k: any): boolean?
 				return on_key(k)
 			end,
+			-- (F6 C3) for the shell's Paste items: interactions when they were
+			-- copied last (true), else nothing done (false)
+			paste_interactions = function(): boolean
+				if not IaClip.newer() then
+					return false
+				end
+				paste_interactions()
+				return true
+			end,
 			-- Keys back to the Canvas (after Find or the palette closes).
 			focus = function()
 				if canvas_el then
@@ -2182,6 +2736,42 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			fit = fit,
 			perf = perf,
 			zoom_at = zoom_at,
+			-- (F6 C1, for tests) The noodles drawn, in Canvas-panel points:
+			-- { id, k, kind, go, x0, y0, x1, y1, mx, my (a point on the line) },
+			-- the selected interactions, and each Screen's box.
+			noodles = function(): any
+				local v = view:peek()
+				if not v then
+					return nil
+				end
+				local out = {}
+				for _, l in noodles_for(sel()) do
+					local mx, my = l.x0, l.y0
+					if l.kind == "curve" then
+						local pts = Noodles.points(l)
+						mx, my = pts[13][1], pts[13][2]
+					end
+					table.insert(out, {
+						id = l.id,
+						k = l.k,
+						kind = l.kind,
+						go = l.go,
+						x0 = v.x + l.x0 * v.zoom,
+						y0 = v.y + l.y0 * v.zoom,
+						x1 = if l.x1 then v.x + l.x1 * v.zoom else nil,
+						y1 = if l.y1 then v.y + l.y1 * v.zoom else nil,
+						mx = v.x + mx * v.zoom,
+						my = v.y + my * v.zoom,
+					})
+				end
+				local screens = {}
+				local i = ix:peek()
+				for _, id in i.kids[""] or {} do
+					local b = i.by[id].bounds
+					table.insert(screens, { id = id, x = v.x + b[1] * v.zoom, y = v.y + b[2] * v.zoom, w = b[3] * v.zoom, h = b[4] * v.zoom })
+				end
+				return { links = out, picked = ia_list(), screens = screens }
+			end,
 			shot = function(done: (content: string?, marks: string?, err: string?) -> ())
 				local v = view:peek()
 				local s = size:peek()
@@ -2292,6 +2882,59 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		context_menu = if props.context_menu then function(e: any): { Node }?
 			local cx, cy = to_canvas(e.local_x, e.local_y)
 			local s = sel()
+			-- On a noodle: Remove link, and Remove all interactions (this
+			-- page's, after a confirm in its submenu).
+			local v0 = view:peek()
+			local nh = if proto_on() and v0 then Noodles.hit(noodles_for(s), cx, cy, v0.zoom) else nil
+			if nh then
+				local l = nh.link
+				if not ia_has(ia_list(), l.id, l.k) then
+					set_ia({ { id = l.id, k = l.k } })
+				end
+				local LL = Look.of(source.dark and source.dark:peek() or false)
+				local all_ops, count = {}, 0
+				for _, r in roots:peek() do
+					for _, it in r.nodes or {} do
+						if it.ia and #it.ia > 0 then
+							count += #it.ia
+							table.insert(all_ops, { op = "update", id = it.id, props = { interactions = if it.ia[1].inh then {} else "__null" } })
+						end
+					end
+				end
+				local sub: any = {
+					open = noodle_confirm,
+					label = "Remove all interactions",
+					Kit.menu_item(LL, {
+						label = `Remove {count} interaction{if count == 1 then "" else "s"} on this page`,
+						danger = true,
+						on_click = function()
+							set_ia({})
+							send(all_ops, "Remove all interactions")
+						end,
+					}),
+					Kit.menu_item(LL, { label = "Cancel", on_click = function() end }),
+				}
+				for k2, v2 in Kit.pop_style(LL) do
+					sub[k2] = v2
+				end
+				sub.w = 236
+				sub.text_size = 12
+				sub.font = Look.UI
+				sub.color = LL.fg
+				local picked = table.clone(ia_list())
+				return {
+					Kit.menu_item(LL, {
+						label = if #picked > 1 then `Remove {#picked} links` else "Remove link",
+						shortcut = "Del",
+						danger = true,
+						on_click = function()
+							rewrite_links(picked, nil, "Remove link")
+						end,
+					}),
+					Kit.menu_sep(LL),
+					ui.submenu(sub),
+				}
+			end
 			local inside = false
 			local f = frame_of(s)
 			if f then

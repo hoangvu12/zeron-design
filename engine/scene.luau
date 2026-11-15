@@ -6,6 +6,9 @@
 local U = require("./util")
 local Text = require("./text")
 local Layout = require("./layout")
+local Proto = require("./proto")
+local Resolve = require("./resolve")
+local Expr = require("./expr")
 
 local M = {}
 
@@ -252,6 +255,7 @@ end
 function M.items(root: any, opts: any?): { any }
 	opts = opts or {}
 	local out = {}
+	local drivers = {}
 	local function visit(node: any, parent: any?, depth: number, pm: { number }?, pbox: any?)
 		local b = node.__box
 		if not b then
@@ -260,6 +264,15 @@ function M.items(root: any, opts: any?): { any }
 		local item: any = { id = node.id, p = if parent then parent.id else nil, d = depth, t = node.type, name = node.name, box = { x = b.x, y = b.y, w = b.w, h = b.h } }
 		if node.__inst then
 			item.inst = node.__inst
+			-- (step 4) the variant set it shows a member of
+			local set = opts.vsets and opts.vsets[node.__inst]
+			if set then
+				item.vset = set
+				-- (shown by Play's variant state: the member the Design has)
+				if node.__ref0 then
+					item.vdef = node.__ref0
+				end
+			end
 		end
 		-- transform chain
 		local m = nil
@@ -337,15 +350,345 @@ function M.items(root: any, opts: any?): { any }
 			end
 		end
 		item.prob = node.__prob
+		if type(node.interactions) == "table" then
+			item.ia = M.ia(node, opts.screens, opts.vsets)
+			-- (step 5, V3) a Change to carries its target member's props
+			-- (`vp`, text): on an Instance bound to variables, Play writes
+			-- them (two-way). `opts.vprops` = { [member id] = props }.
+			if item.ia and opts.vprops then
+				local function mark(list: any)
+					for _, a in list or {} do
+						if a.k == "changeTo" and a.to and opts.vprops[a.to] then
+							a.vp = opts.vprops[a.to]
+						elseif a.k == "if" then
+							mark(a.th)
+							mark(a.el)
+						end
+					end
+				end
+				for _, e in item.ia do
+					mark(e.acts)
+				end
+			end
+			-- (step 5) the modes pinned on it or a parent: a set writes the
+			-- variable's value for those modes (engine/vars.luau)
+			if item.ia and type(node.__pin) == "table" and next(node.__pin) ~= nil then
+				item.th = node.__pin
+			end
+		end
+		-- (step 5) an Instance whose variant properties are bound to variables:
+		-- { [prop] = token name } (a Change to on it writes them, two-way)
+		if node.__vb then
+			item.vb = node.__vb
+			if not item.th and type(node.__pin) == "table" and next(node.__pin) ~= nil then
+				item.th = node.__pin
+			end
+		end
+		-- overlays (step 2): a top-level frame's overlay settings
+		if depth == 0 and t == "frame" and type(node.overlay) == "table" then
+			item.ovl = Proto.played_overlay(node.overlay)
+		end
 		table.insert(out, item)
+		if type(node.states) == "table" then
+			table.insert(drivers, { at = #out, node = node })
+		end
 		local at = #out
 		for _, c in (node.children or {}) do
 			visit(c, node, depth + 1, m, b)
 		end
 		item.n = #out - at
+		-- scrolling (step 2): how it scrolls, and how big its content is
+		if t == "frame" and Proto.OVERFLOW[node.overflow] then
+			item.ovf = node.overflow
+			local cw, ch = Proto.content_extent(node)
+			item.cx = { w = cw, h = ch }
+		end
+		if node.scroll == "fixed" or node.scroll == "sticky" then
+			item.scr = node.scroll
+		end
+		-- Smart Animate (step 3): a match key over the name path
+		if type(node.match) == "string" and node.match ~= "" then
+			item.mt = node.match
+		elseif node.match == false then
+			item.mt = false
+		end
 	end
 	visit(root, nil, 0, nil, nil)
+	for _, dv in drivers do
+		M.states_of(out, dv.at, dv.node, opts.images)
+	end
 	return out
+end
+
+-- ── prototypes (CONTRACT Changes 2026-11-14) ─────────────────────────────
+
+-- One action as the tab plays it: { k = <action kind>, … } (CONTRACT
+-- Changes, step 2). nil for what the tab can't run.
+function M.act_of(a: any, screens: any?, vsets: any?): any?
+	if type(a) ~= "table" then
+		return nil
+	end
+	local kind = a.action
+	if kind == "navigate" then
+		local e: any = { k = "navigate", go = a.to, tr = Proto.played(a.transition) }
+		if screens and not screens[a.to] then
+			e.broken = true
+		end
+		if a.resetScroll == true then
+			e.rs = true
+		end
+		if a.resetComponents == true then
+			e.rc = true
+		end
+		return e
+	elseif kind == "changeTo" then
+		-- (step 4) { k, to = member id, set, tr }; broken when `to` is in no set
+		local e: any = { k = "changeTo", to = a.to, tr = Proto.played(a.transition) }
+		e.set = vsets and vsets[a.to]
+		if not e.set then
+			e.broken = true
+		end
+		return e
+	elseif kind == "scrollTo" then
+		return Proto.played_scroll(a)
+	elseif kind == "back" then
+		local e: any = { k = "back" }
+		if type(a.transition) == "table" then
+			e.tr = Proto.played(a.transition)
+		end
+		return e
+	elseif kind == "url" then
+		local e: any = { k = "url", url = a.url }
+		if a.newTab == false then
+			e.nt = false
+		end
+		return e
+	elseif kind == "motion" then
+		return { k = "motion", play = a.play }
+	elseif kind == "overlay" or kind == "swap" or kind == "close" then
+		-- (overlays, step 2: frame settings come on the overlay's root item, `ovl`)
+		local e = Proto.played_overlay_act(a)
+		if e.go and screens and not screens[e.go] then
+			e.broken = true
+		end
+		return e
+	elseif kind == "set" or kind == "toggle" then
+		-- (step 5) { k = "set", var, to = literal } or { k = "set", var, ex =
+		-- expression source } (Vars.run_set runs either); a toggle is a set of
+		-- `not var` marked tg
+		if type(a.var) ~= "string" then
+			return nil
+		end
+		if kind == "toggle" then
+			return { k = "set", var = a.var, ex = "not " .. Expr.var_src(a.var), tg = true }
+		end
+		local inner = Expr.inner(a.to)
+		if inner then
+			return { k = "set", var = a.var, ex = inner }
+		end
+		local ref = Resolve.reference(a.to)
+		if ref then
+			return { k = "set", var = a.var, ex = Expr.var_src(ref) }
+		end
+		return { k = "set", var = a.var, to = a.to }
+	elseif kind == "mode" then
+		if type(a.axis) ~= "string" or a.value == nil then
+			return nil
+		end
+		return { k = "mode", axis = a.axis, value = tostring(a.value) }
+	elseif kind == "if" then
+		-- { k = "if", cond = expression source, th = { acts }, el = { acts } }
+		local cond = if type(a.cond) == "string" then (Expr.inner(a.cond) or a.cond) else nil
+		if not cond then
+			return nil
+		end
+		local function acts(list)
+			local out = {}
+			for _, x in U.list(list) do
+				local e = M.act_of(x, screens, vsets)
+				if e then
+					table.insert(out, e)
+				end
+			end
+			return out
+		end
+		return { k = "if", cond = cond, th = acts(a["then"]), el = acts(a["else"]) }
+	end
+	return nil
+end
+
+-- A node's reactions as the tab plays them, one per reaction: its trigger
+-- (`on`, with `ms` for a delay and `keys` for a key combo), every action
+-- in order (`acts`), and its first navigate/back/url action spelled out on
+-- the entry itself (go/url/nt/tr/broken, as in step 1: noodles, hotspots).
+-- screens: id → name (broken links).
+function M.ia(node: any, screens: any?, vsets: any?): { any }?
+	local out = {}
+	for _, r in U.list(node.interactions) do
+		if type(r) ~= "table" then
+			continue
+		end
+		local t = r.trigger
+		local e: any = { on = Proto.trigger_name(t), acts = {} }
+		if type(t) == "table" then
+			if e.on == "afterDelay" then
+				e.ms = U.num(t.ms, 0)
+			elseif Proto.MOUSE_DELAY[e.on] and type(t.delay) == "number" and t.delay > 0 then
+				e.ms = t.delay
+			elseif e.on == "key" then
+				e.keys = if type(t.keys) == "string" then { t.keys } else table.clone(t.keys or {})
+			end
+		end
+		local first = nil
+		for _, a in U.list(r.actions) do
+			local act = M.act_of(a, screens, vsets)
+			if act then
+				table.insert(e.acts, act)
+				if not first and Proto.MOVES[act.k] then
+					first = act
+				end
+			end
+		end
+		if #e.acts == 0 then
+			continue
+		end
+		if first then
+			if first.k == "url" then
+				e.url, e.nt = first.url, first.nt
+			else
+				e.go = if first.k == "back" then "back" else first.go
+				e.tr, e.broken = first.tr, first.broken
+			end
+		end
+		if node.__inh_ia then
+			e.inh = true
+		end
+		table.insert(out, e)
+	end
+	return if #out > 0 then out else nil
+end
+
+-- One state's properties as scene values.
+local function state_entry(props: any, of: string, s: string, images: any?): any
+	local e: any = { of = of, s = s }
+	if props.fill ~= nil then
+		e.fill = M.paints(props.fill, images) or {}
+	end
+	if props.stroke ~= nil then
+		e.stroke = stroke(props.stroke, images) or false
+	end
+	if props.effect ~= nil then
+		e.fx = effects(props.effect) or {}
+	end
+	if type(props.opacity) == "number" then
+		e.op = U.clamp(props.opacity, 0, 1)
+	end
+	if props.cornerRadius ~= nil then
+		e.r = radii(props.cornerRadius)
+	end
+	if type(props.scale) == "number" then
+		e.sc = U.clamp(props.scale, 0.5, 2)
+	end
+	return e
+end
+
+-- The `st` entries a driver (items[at], `node`) puts on itself and on the
+-- items its `descendants` reach, and its `sttr`.
+function M.states_of(items: { any }, at: number, node: any, images: any?)
+	local driver = items[at]
+	local states = node.states
+	local tr = if type(states.transition) == "table" then states.transition else {}
+	local ease, sp, sp_ms = Proto.played_ease(tr.easing)
+	driver.sttr = { ms = sp_ms or U.num(tr.duration, Proto.DEFAULT_STATE_MS), ease = ease, sp = sp }
+	if node.__inh_st then
+		driver.stinh = true
+	end
+	local within = table.move(items, at + 1, at + (driver.n or 0), 1, {})
+	for _, s in { "hover", "press" } do
+		local props = states[s]
+		if type(props) == "table" then
+			driver.st = driver.st or {}
+			table.insert(driver.st, state_entry(props, driver.id, s, images))
+			if type(props.descendants) == "table" then
+				local keys = {}
+				for k in props.descendants do
+					table.insert(keys, k)
+				end
+				table.sort(keys)
+				for _, key in keys do
+					local sub = props.descendants[key]
+					if type(sub) == "table" then
+						for _, id in Proto.reach(key, driver.id, within) do
+							for _, it in within do
+								if it.id == id then
+									it.st = it.st or {}
+									table.insert(it.st, state_entry(sub, driver.id, s, images))
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+-- The items with driver id's state s applied (press over hover): what
+-- a screenshot of that state draws. Changes items in place.
+function M.apply_state(items: { any }, id: string, s: string)
+	local at = nil
+	for i, it in items do
+		if it.id == id then
+			at = i
+			break
+		end
+	end
+	if not at then
+		return false
+	end
+	local driver = items[at]
+	local scale = nil
+	local order = if s == "press" then { "hover", "press" } else { "hover" }
+	for i = at, at + (driver.n or 0) do
+		local it = items[i]
+		for _, want in order do
+			for _, e in (it.st or {}) do
+				if e.of == id and e.s == want then
+					if e.fill then
+						it.fill = if #e.fill > 0 then e.fill else nil
+					end
+					if e.stroke ~= nil then
+						it.stroke = e.stroke or nil
+					end
+					if e.fx then
+						it.fx = if #e.fx > 0 then e.fx else nil
+					end
+					if e.op then
+						it.op = if e.op < 1 then e.op else nil
+					end
+					if e.r and it.shape and it.shape.k == "rect" then
+						it.shape = table.clone(it.shape)
+						it.shape.r = e.r
+					end
+					if e.sc and i == at then
+						scale = e.sc
+					end
+				end
+			end
+		end
+	end
+	if scale and scale ~= 1 then
+		local b = driver.box
+		local cx, cy = b.x + b.w / 2, b.y + b.h / 2
+		local S = { scale, 0, 0, scale, cx - scale * cx, cy - scale * cy }
+		for i = at, at + (driver.n or 0) do
+			local it = items[i]
+			local m = if it.xf then { it.xf.a, it.xf.b, it.xf.c, it.xf.d, it.xf.e, it.xf.f } else { 1, 0, 0, 1, it.box.x, it.box.y }
+			local r = mul(S, m)
+			it.xf = { a = r[1], b = r[2], c = r[3], d = r[4], e = r[5], f = r[6] }
+		end
+	end
+	return true
 end
 
 return M

@@ -181,7 +181,7 @@ function M.run(d: any, entries: { any }, io: any): (any, { any })
 				for _, b in boards do
 					table.insert(ids, b.id)
 				end
-				local okh, html = pcall(Export.html, d.doc, ids, { css = e.css, scaffold = true, icons = io.icons })
+				local okh, html = pcall(Export.html, d.doc, ids, { css = e.css, scaffold = true, icons = io.icons, prototype = Export.has_interactions(d.doc) })
 				if okh then
 					put(folder, "index.html", html, false, "html")
 				else

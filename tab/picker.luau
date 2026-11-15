@@ -13,6 +13,7 @@ local ui = require("./pointer").ui
 
 local Kit = require("./kit")
 local Look = require("./look")
+local PV = require("./proto_vars")
 
 local M = {}
 
@@ -893,6 +894,101 @@ function M.Picker(props: PickerProps): Node
 				variables(),
 			}
 		end, { w_full = true }),
+	}
+end
+
+-- Variables of some types (step 5, V5b): the list an "Apply variable" button
+-- opens beside the properties panel (text content, visibility, a number, a
+-- variant property). 240 wide, p8 r12: a head ("Variables" and the types it
+-- takes), then a row a variable of those types (its type icon, or its
+-- swatch for a colour; its name; its value, faint), the bound one on
+-- accent_soft. None of those types: a line saying so.
+--
+--   Picker.Vars { L, vars = { { name, kind, value } }, kinds = { "number" },
+--                 bound = "count"?, pick = function(name) … end }
+-- (the helpers are proto_vars.luau's, which the tests reach)
+M.VAR_ICON = { color = "drop", number = "braces", string = "text", boolean = "check" }
+M.VAR_LABEL = PV.TYPE_LABEL
+M.var_text = PV.var_text
+
+export type VarsProps = {
+	L: any,
+	vars: { any },
+	kinds: { string },
+	bound: string?,
+	pick: (name: string) -> (),
+}
+
+function M.Vars(props: VarsProps): Node
+	local L = props.L
+	local list = PV.vars_of(props.vars, props.kinds)
+	local labels = {}
+	for _, k in props.kinds do
+		table.insert(labels, M.VAR_LABEL[k] or k)
+	end
+	local kinds_text = table.concat(labels, " or ")
+	local rows: any = { w_full = true, gap = 1, max_h = 236, overflow_y = "auto" }
+	for _, v in list do
+		local bound = props.bound == v.name
+		local mark: Node = if v.kind == "color"
+			then ui.div { w = 14, h = 14, min_w = 14, shrink = 0, rounded = 4, bg = if type(v.value) == "string" then v.value else "#00000000", border = 1, border_color = L.border }
+			else ui.div { w = 14, shrink = 0, color = if bound then L.accent_fg else L.faint, Kit.icon(M.VAR_ICON[v.kind] or "braces", 13) }
+		table.insert(
+			rows,
+			ui.button {
+				id = `vars-pick-{v.name}`,
+				label = v.name,
+				w_full = true,
+				h = 28,
+				min_h = 28,
+				px = 8,
+				gap = 8,
+				rounded = 7,
+				border = 0,
+				items = "center",
+				bg = if bound then L.accent_soft else "#00000000",
+				hover = { bg = if bound then L.accent_soft else L.hover },
+				focus = { outline = 0 },
+				on_click = function()
+					props.pick(v.name)
+				end,
+				mark,
+				Kit.text(L, v.name, { color = if bound then L.accent_fg else L.fg, weight = if bound then 500 else 400, grow = 1, truncate = true }),
+				Kit.text(L, M.var_text(v.kind, v.value), { color = L.faint }),
+			}
+		)
+	end
+	local body: Node
+	if #list == 0 then
+		body = ui.column {
+			id = "vars-pick-empty",
+			w_full = true,
+			px = 8,
+			py = 6,
+			gap = 4,
+			Kit.text(L, `No {string.lower(kinds_text)} variables yet`, { color = L.fg }),
+			ui.text { "Add one in Variables (the braces on the toolbar), then bind it here.", text_size = 12, color = L.faint, font = Look.UI, wrap = true, w_full = true },
+		}
+	else
+		body = ui.scroll(rows)
+	end
+	return ui.column {
+		id = "vars-pick",
+		w = 238,
+		p = 8,
+		gap = 6,
+		bg = L.panel_solid,
+		rounded = 12,
+		ui.row {
+			w_full = true,
+			h = 20,
+			px = 8,
+			gap = 6,
+			items = "center",
+			ui.text { "Variables", text_size = 12, weight = 500, color = L.fg, font = Look.UI, grow = 1 },
+			ui.text { kinds_text, text_size = 12, color = L.faint, font = Look.UI },
+		},
+		body,
 	}
 end
 

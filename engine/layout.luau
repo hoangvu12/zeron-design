@@ -439,4 +439,34 @@ function M.run(roots: { any }): number
 	return pass.count
 end
 
+-- (step 6 P5, pure/anim/f6/PLAN.md) Responsive: top-level frames (Screens)
+-- laid out at a window of `w` × `h` instead of their own size, as Figma's
+-- Responsive scaling. The root takes the window's width; its height is the
+-- window's, unless the Screen is taller (as designed, or its content once
+-- re-wrapped at that width): then it keeps that and scrolls. Inside, auto
+-- layout, fill and hug do the rest. The format has no constraints (pen.dev
+-- has none), so a child outside auto layout keeps its x and y: Figma's
+-- default constraints (Left, Top). The nodes are changed in place (resolved
+-- copies) and laid out; anything else in `roots` is laid out as usual.
+function M.responsive(roots: { any }, w: number, h: number): number
+	w, h = math.max(1, w), math.max(1, h)
+	local n = 0
+	for _, node in roots do
+		if node.type == "frame" and not node.__broken then
+			node.width = w
+			node.__sizing = nil
+			n += M.run({ node })
+			local b = node.__box
+			if b and b.h < h - EPSILON then
+				node.height = h
+				node.__sizing = nil
+				n += M.run({ node })
+			end
+		else
+			n += M.run({ node })
+		end
+	end
+	return n
+end
+
 return M

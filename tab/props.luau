@@ -21,6 +21,7 @@ local Kit = require("./kit")
 local Look = require("./look")
 local Layers = require("./layers")
 local Picker = require("./picker")
+local Bind = require("./bind")
 
 local Pdf = require("./pdf")
 
@@ -556,6 +557,8 @@ function M.Props(props: PropsProps): Node
 	table.sort(color_tokens, function(a, b)
 		return a.name < b.name
 	end)
+	-- (step 5, V5b) every variable, for the Apply variable lists
+	local bind_vars = Bind.vars(props.tokens)
 
 	-- What the selection shares: `value`, or nil and `mixed`.
 	local function shared(fn: (s: any) -> any): (any, boolean)
@@ -595,7 +598,8 @@ function M.Props(props: PropsProps): Node
 		for _, s in sel do
 			local p = if type(make) == "function" then make(s) else make
 			if next(p) ~= nil then
-				table.insert(ops, { op = "update", id = s.id, props = p })
+				-- (a rotation turns about the layer's centre, as Figma's field does)
+				table.insert(ops, { op = "update", id = s.id, props = p, turn = if p.rotation ~= nil then true else nil })
 				-- (Shown at once: the next scene confirms it.)
 				for k, v in p do
 					s.node[k] = if v == "__null" then nil else v
@@ -611,11 +615,75 @@ function M.Props(props: PropsProps): Node
 		local r = math.floor(x * 100 + 0.5) / 100
 		return if r == math.floor(r) then tostring(math.floor(r)) else tostring(r)
 	end
-	local function value_num(o: { empty: string?, label: string?, icon: string?, tip: string?, key: string, get: ((s: any) -> any)?, set: ((s: any, v: number) -> any)?, unit: string?, min: number?, max: number?, read_only: boolean?, scale: number?, show: ((x: number) -> number)?, fg: string? }): Node
+	-- (step 5, V5b) A field with an Apply variable button at its end, shown
+	-- while the field is hovered (or its list is open), as Figma's.
+	local function with_bind(id: string, what: string, kinds: { string }, pick: (name: string) -> (), build: (trailing: Node) -> Node): Node
+		return ui.component(function(): Node
+			local hov = ui.use_state(false)
+			local btn = Bind.button(L, {
+				id = id,
+				what = what,
+				kinds = kinds,
+				vars = bind_vars,
+				pick = pick,
+				shown = function(): boolean
+					return hov:get()
+				end,
+			})
+			return ui.div {
+				w_full = true,
+				min_w = 0,
+				on_hover = function(on: boolean)
+					hov:set(on)
+				end,
+				build(ui.div { shrink = 0, mr = 4, btn }),
+			}
+		end)({})
+	end
+	local function bind_id(tip: string): string
+		return "bind-" .. string.lower((string.gsub(tip, "[^%w]+", "-")))
+	end
+
+	local function value_num(o: { empty: string?, label: string?, icon: string?, tip: string?, key: string, get: ((s: any) -> any)?, set: ((s: any, v: number) -> any)?, unit: string?, min: number?, max: number?, read_only: boolean?, scale: number?, show: ((x: number) -> number)?, fg: string?, bind: boolean?, bind_set: ((s: any, ref: string) -> any)? }): Node
 		local get = o.get or function(s: any): any
 			return s.node[o.key]
 		end
 		local v, mixed = shared(get)
+		local what = o.tip or o.label or o.key
+		-- (step 5, V5b) binding it: `bind_set(s, "$name")`, else `set(s, "$name")`
+		-- (the setters only place the value), else the key itself.
+		local function bind_to(name: string)
+			local ref = "$" .. name
+			update(function(s: any): { [string]: any }
+				if o.bind_set then
+					return { [o.key] = o.bind_set(s, ref) }
+				elseif o.set then
+					return { [o.key] = o.set(s, ref :: any) }
+				end
+				return { [o.key] = ref }
+			end, "Apply variable")
+		end
+		if o.bind and not o.read_only and not mixed and Bind.ref(v) then
+			local name = Bind.ref(v) :: string
+			local x = n(resolve(v))
+			local shown = if x and o.show then o.show(x) elseif x then x * (o.scale or 1) else nil
+			return Bind.chip(L, {
+				id = bind_id(what) .. "-chip",
+				what = what,
+				name = name,
+				kind = Bind.kind_of(bind_vars, name),
+				value = shown,
+				vars = bind_vars,
+				kinds = { "number" },
+				pick = bind_to,
+				detach = function()
+					local keep = shown or 0
+					update(function(s: any): { [string]: any }
+						return { [o.key] = if o.set then o.set(s, keep) else keep / (o.scale or 1) }
+					end, "Detach variable")
+				end,
+			})
+		end
 		-- Unset, with a word for it ("Auto"): that word, greyed.
 		if not mixed and v == nil and o.empty then
 			return Kit.field(L, {
@@ -684,7 +752,8 @@ function M.Props(props: PropsProps): Node
 			})
 		end
 		local scale = o.scale or 1
-		return Kit.num(L, {
+		local function num(trailing: Node?): Node
+			return Kit.num(L, {
 			label = o.label,
 			icon = o.icon,
 			tip = o.tip,
@@ -693,6 +762,7 @@ function M.Props(props: PropsProps): Node
 			max = o.max,
 			read_only = o.read_only,
 			fg = o.fg,
+			trailing = trailing,
 			get = function(): number?
 				if mixed then
 					return nil
@@ -708,7 +778,12 @@ function M.Props(props: PropsProps): Node
 					return { [o.key] = x / scale }
 				end, "Change " .. (o.tip or o.label or o.key))
 			end,
-		})
+			})
+		end
+		if o.bind and not o.read_only then
+			return with_bind(bind_id(what), string.lower(what), { "number" }, bind_to, num)
+		end
+		return num(nil)
 	end
 
 	local sections: { Node } = {}
@@ -1085,7 +1160,7 @@ function M.Props(props: PropsProps): Node
 					end
 					table.insert(grid, ui.row(grid_row))
 				end
-				local gap_field = value_num({ icon = "gap", tip = "Gap", key = "gap", min = 0, set = function(_s: any, v: number): any
+				local gap_field = value_num({ icon = "gap", tip = "Gap", key = "gap", min = 0, bind = true, set = function(_s: any, v: number): any
 					return if v == 0 then "__null" else v
 				end })
 				table.insert(
@@ -1131,6 +1206,7 @@ function M.Props(props: PropsProps): Node
 								tip = "Padding " .. lbl,
 								key = "padding",
 								min = 0,
+								bind = true,
 								get = function(s: any): any
 									return padding4(s.node.padding)[i]
 								end,
@@ -1151,6 +1227,7 @@ function M.Props(props: PropsProps): Node
 								tip = if i == 1 then "Vertical padding" else "Horizontal padding",
 								key = "padding",
 								min = 0,
+								bind = true,
 								get = function(s: any): any
 									return padding4(s.node.padding)[i]
 								end,
@@ -1180,10 +1257,38 @@ function M.Props(props: PropsProps): Node
 			return s.node.type == "text"
 		end)
 		local function axis(k: string, bk: string, lbl: string?): Node
-			return Kit.num(L, {
+			local tip = if k == "width" then "Width" else "Height"
+			-- (step 5, V5b) bound to a number variable: its chip (detach keeps
+			-- the size drawn); else the field, with Apply variable on hover
+			local now, now_mixed = prop(k)
+			local name = if now_mixed then nil else Bind.ref(now)
+			local function bind_to(v: string)
+				update({ [k] = "$" .. v }, "Apply variable")
+			end
+			if name then
+				local x = n(resolve(now))
+				return Bind.chip(L, {
+					id = `bind-{k}-chip`,
+					what = tip,
+					name = name,
+					kind = Bind.kind_of(bind_vars, name),
+					value = x,
+					vars = bind_vars,
+					kinds = { "number" },
+					pick = bind_to,
+					detach = function()
+						update(function(s: any): { [string]: any }
+							return { [k] = math.floor(s.box[bk] + 0.5) }
+						end, "Detach variable")
+					end,
+				})
+			end
+			return with_bind(`bind-{k}`, string.lower(tip), { "number" }, bind_to, function(trailing: Node): Node
+				return Kit.num(L, {
 				id = `size-{k}`,
 				label = lbl,
-				tip = if k == "width" then "Width" else "Height",
+				tip = tip,
+				trailing = trailing,
 				min = 0,
 				get = function(): number?
 					local v, mixed = shared(function(s)
@@ -1200,7 +1305,8 @@ function M.Props(props: PropsProps): Node
 						return p
 					end, "Resize")
 				end,
-			})
+				})
+			end)
 		end
 		local function mode_of(s: any, k: string): string
 			local v = s.node[k]
@@ -1251,7 +1357,8 @@ function M.Props(props: PropsProps): Node
 						end,
 					}),
 				},
-				ui.div { w = 56, shrink = 0, axis(k, bk, nil) },
+				-- (wide enough for the Apply variable mark, or a bound chip)
+				ui.div { w = 80, shrink = 0, axis(k, bk, nil) },
 			}
 		end
 		if text then
@@ -1329,6 +1436,14 @@ function M.Props(props: PropsProps): Node
 			unit = "%",
 			min = 0,
 			max = 100,
+			bind = true,
+			-- (a bound opacity holds the variable's 0–1, shown as a %)
+			show = function(x: number): number
+				return x * 100
+			end,
+			bind_set = function(_s: any, ref: string): any
+				return ref
+			end,
 			get = function(s: any): any
 				local o = s.node.opacity
 				if type(o) == "string" then
@@ -1350,6 +1465,7 @@ function M.Props(props: PropsProps): Node
 				tip = "Corner radius",
 				key = "cornerRadius",
 				min = 0,
+				bind = true,
 				get = function(s: any): any
 					local r = s.node.cornerRadius
 					if type(r) == "table" then
@@ -1385,6 +1501,7 @@ function M.Props(props: PropsProps): Node
 							tip = "Corner " .. i,
 							key = "cornerRadius",
 							min = 0,
+							bind = true,
 							get = function(s: any): any
 								local r = s.node.cornerRadius
 								return if type(r) == "table" then r[i] else (r or 0)
@@ -1435,14 +1552,81 @@ function M.Props(props: PropsProps): Node
 				end)
 			)
 		end
+		-- (step 5, V5b) Mode: a frame's own pick of each theme axis (Figma's
+		-- "explicit mode", the node's `theme` key; its layers inherit it).
+		-- Auto follows the page.
+		local axes_list = (props.tokens and props.tokens.axes) or {}
+		if #axes_list > 0 and all(function(s)
+			return s.node.type == "frame" or s.node.type == "instance"
+		end) then
+			for _, a in axes_list do
+				local axis = a.axis
+				local cur, cur_mixed = shared(function(s)
+					return if type(s.node.theme) == "table" then s.node.theme[axis] else nil
+				end)
+				local function put(v: string?)
+					update(function(s: any): { [string]: any }
+						local th = if type(s.node.theme) == "table" then table.clone(s.node.theme) else {}
+						th[axis] = v
+						return { theme = if next(th) == nil then "__null" else th }
+					end, "Mode")
+				end
+				local items = { { label = "Auto (from the page)", checked = not cur_mixed and cur == nil, on_click = function()
+					put(nil)
+				end } }
+				for _, v in a.values or {} do
+					table.insert(items, { label = tostring(v), checked = cur == v, on_click = function()
+						put(v)
+					end })
+				end
+				table.insert(body, dropdown({
+					id = `mode-{axis}`,
+					label = `Mode: {axis}`,
+					leading = lead_icon("moon"),
+					value = function(): string
+						return if cur_mixed then `{axis}: Mixed` elseif cur then `{axis}: {cur}` else `{axis}: Auto`
+					end,
+					items = items,
+				}))
+			end
+		end
 		local hidden = all(function(s)
 			return s.node.enabled == false
 		end)
-		add(sec("Appearance", {
-			act(if hidden then "eyeOff" else "eye", if hidden then "Show" else "Hide", function()
+		-- (step 5, V5b) visibility bound to a boolean variable (`enabled =
+		-- "$flag"`): a chip over the rows, "Visible if flag", whose detach
+		-- keeps what it shows now; Apply variable beside the eye
+		local en, en_mixed = prop("enabled")
+		local vis_name = if en_mixed then nil else Bind.ref(en)
+		local function bind_vis(v: string)
+			update({ enabled = "$" .. v }, "Apply variable")
+		end
+		if vis_name then
+			local val = resolve(en)
+			table.insert(body, 1, Bind.chip(L, {
+				id = "bind-visible-chip",
+				what = "Visibility",
+				label = "Visible if",
+				name = vis_name,
+				kind = Bind.kind_of(bind_vars, vis_name),
+				value = val,
+				vars = bind_vars,
+				kinds = { "boolean" },
+				pick = bind_vis,
+				detach = function()
+					update({ enabled = if val == false then false else "__null" }, "Detach variable")
+				end,
+			}))
+		end
+		local head_acts: { Node } = {
+			ui.div { my = -2, mr = -3, Bind.button(L, { id = "bind-visible", what = "visibility", kinds = { "boolean" }, vars = bind_vars, bound = vis_name, pick = bind_vis }) },
+		}
+		if not vis_name then
+			table.insert(head_acts, act(if hidden then "eyeOff" else "eye", if hidden then "Show" else "Hide", function()
 				update({ enabled = if hidden then "__null" else false }, if hidden then "Show" else "Hide")
-			end),
-		}, body))
+			end))
+		end
+		add(sec("Appearance", head_acts, body))
 	end
 
 	-- A colour's field: its swatch (opening the picker beside the panel),
@@ -1629,6 +1813,8 @@ function M.Props(props: PropsProps): Node
 				return label
 			end,
 			fg = if bound then L.accent_fg else nil,
+			-- (step 5, V5b) a bound colour reads as the other bound chips
+			bg = if bound then L.accent_soft else nil,
 			mono = false,
 			read_only = not plain,
 			trailing = trailing,
@@ -1673,6 +1859,17 @@ function M.Props(props: PropsProps): Node
 							opacity = if enabled then 1 else 0.5,
 							color_field({ id = `paint-{key}-{i}`, title = title, paint = p, commit = set_paint }),
 						},
+						-- (step 5, V5b) Apply variable: the colour variables
+						Bind.button(L, {
+							id = `bind-{key}-{i}`,
+							what = string.lower(title),
+							kinds = { "color" },
+							vars = bind_vars,
+							bound = Bind.ref(p),
+							pick = function(name: string)
+								set_paint("$" .. name, false)
+							end,
+						}),
 						mini(if enabled then "eye" else "eyeOff", if enabled then "Hide paint" else "Show paint", function()
 							local np: any = p
 							if type(np) == "string" then
@@ -1813,7 +2010,55 @@ function M.Props(props: PropsProps): Node
 				end,
 			})
 		end
+		-- (step 5, V5b) the text itself: bound to a text or number variable
+		-- (`content = "$name"`) it's a chip, whose detach keeps the words it
+		-- shows; else a field, with Apply variable on hover
+		local content, c_mixed = prop("content")
+		local c_name = if c_mixed then nil else Bind.ref(content)
+		local function bind_text(v: string)
+			update({ content = "$" .. v }, "Apply variable")
+		end
+		local content_row: Node
+		if c_name then
+			local kind = Bind.kind_of(bind_vars, c_name)
+			local val = resolve(content)
+			content_row = Bind.chip(L, {
+				id = "bind-text-chip",
+				what = "Text",
+				name = c_name,
+				kind = kind,
+				value = val,
+				vars = bind_vars,
+				kinds = { "string", "number" },
+				pick = bind_text,
+				detach = function()
+					update({ content = Bind.literal(kind, if val == content then "" else val, "text") }, "Detach variable")
+				end,
+			})
+		else
+			content_row = with_bind("bind-text", "text", { "string", "number" }, bind_text, function(trailing: Node): Node
+				return Kit.field(L, {
+					id = "text-content",
+					tip = "Text",
+					mono = false,
+					leading = lead_icon("pencil"),
+					value = function(): string?
+						if c_mixed then
+							return nil
+						end
+						return if type(content) == "string" then content else ""
+					end,
+					commit = function(t: string)
+						if t ~= content then
+							update({ content = t }, "Text")
+						end
+					end,
+					trailing = trailing,
+				})
+			end)
+		end
 		local body: { Node } = {
+			content_row,
 			Kit.field(L, {
 				id = "font-family",
 				tip = if fam_bound then `Font ({string.sub(fam, 2)})` else "Font",

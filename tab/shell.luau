@@ -1,6 +1,7 @@
 --!strict
 -- The hand cursor on clickable controls (zgx's ui is read-only: see pointer.luau).
-local ui = require("./pointer").ui
+local Pointer = require("./pointer")
+local ui = Pointer.ui
 -- The Design editor, as the redesign lays it out (the Design "Design (pure)
 -- — Editor UI", frames Editor dark / light / narrow): the Canvas under
 -- floating islands, Look.EDGE (16) from the window and Look.INSET (8) from
@@ -27,6 +28,10 @@ local Look = require("./look")
 local Picker = require("./picker")
 local Palette = require("./palette")
 local Props = require("./props")
+local Play = require("./play")
+local PlayPlace = require("./play_place")
+local ProtoPanel = require("./proto_panel")
+local IaClip = require("./ia_clip")
 
 local M = {}
 
@@ -48,8 +53,14 @@ local TOOLS = {
 -- properties hidden, Variables, the tool, zoom and pan, the selection.
 export type Prefs = { get: (key: string) -> any, set: (key: string, value: any) -> () }
 
-function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((api: any) -> ())?, log: ((string) -> ())?, prefs: Prefs? }): Node
+function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((api: any) -> ())?, expose_play: ((api: any) -> ())?, expose_preview: ((api: any) -> ())?, log: ((string) -> ())?, prefs: Prefs? }): Node
 	local source = props.source
+	-- (F6 C3) The selected interactions, shared by the Canvas (noodles) and
+	-- the Prototype panel (a picked row): the service's, or the editor's own
+	-- when the source has none (the harness's fixture).
+	if type(source) == "table" and source.ia_sel == nil then
+		source.ia_sel = ui.state(`shell.{props.id or "tab"}.ia_sel`, { key = "", list = {} } :: any)
+	end
 	local L = Look.of(props.dark)
 	local tool = ui.use_state("move")
 	local hover = ui.use_state(nil :: string?)
@@ -156,7 +167,9 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 					-- override them (pen's Layout, Fill… on an Instance); edits
 					-- still write overrides on the Instance.
 					if entry.node.type == "instance" and type(info.resolved) == "table" then
-						local own = { id = true, type = true, ref = true, children = true, name = true, reusable = true, descendants = true, x = true, y = true }
+						-- (Prototype keys stay as written: the Prototype tab shows the
+						-- inherited ones greyed, from `resolved`.)
+						local own = { id = true, type = true, ref = true, children = true, name = true, reusable = true, descendants = true, x = true, y = true, states = true, interactions = true }
 						for k2, v2 in info.resolved do
 							if entry.node[k2] == nil and not own[k2] then
 								entry.node[k2] = v2
@@ -219,12 +232,17 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			edit(ops, label)
 		end
 		local function paste(into: string?)
+			-- (F6 C3) interactions copied last: appended to the selection
+			if api and api.paste_interactions and api.paste_interactions() then
+				return
+			end
 			edit({ { op = "paste", into = into } }, "Paste")
 		end
 		if any then
 			item("Copy", "Ctrl C", function()
 				if source.copy then
 					source.copy(ids, false)
+					IaClip.layers_copied()
 				end
 			end)
 			if source.code then
@@ -1231,9 +1249,149 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 
 	-- The properties show only while something is selected (pen hides them
 	-- with nothing selected), and while the person hasn't hidden them.
+	-- The properties' tab, Design | Prototype (Figma's), kept for the tab's
+	-- session; the Prototype tab shows the Flows with nothing selected.
+	local panel_tab = ui.state(`design.{props.id or "design"}.panel_tab`, "design")
+	local show_all_links = ui.state(`design.{props.id or "design"}.show_all_links`, false)
 	local props_shown = ui.computed(function(): boolean
-		return props_open:get() and #(source.selection:get() or {}) > 0
+		return props_open:get() and (#(source.selection:get() or {}) > 0 or panel_tab:get() == "prototype")
 	end)
+
+	-- Play (proto-step1-spec §6): from the selected Screen, else the flow
+	-- (a menu when there are several), else the first Screen.
+	local playing = ui.use_state(nil :: any)
+	local play_menu = ui.use_state(false)
+	local function screens_list(): { any }
+		local out = {}
+		for _, r in source.roots:peek() do
+			local it = r.nodes and r.nodes[1]
+			if it and it.t == "frame" and not it.comp then
+				table.insert(out, { id = r.id, name = it.name or r.id })
+			end
+		end
+		return out
+	end
+	local function flows_list(): { any }
+		return if source.flows then source.flows:peek() or {} else {}
+	end
+	-- (step 6 P4) The inline Preview (Shift+Space, or the phone button by ▶):
+	-- Play in `mode = "preview"` in an island left of the properties, resized
+	-- by its left and bottom edges (Shift keeps the ratio), its size kept. A
+	-- Screen clicked on the canvas plays there; Follow prototype selects the
+	-- Screen it shows. One per tab, and full Play closes it (never two Plays).
+	-- (`pre` holds its parts, as Play's `dev`: few new locals here)
+	local pre: any = {
+		on = ui.use_state(nil :: any), -- { start, flow, n } while open
+		size = ui.state("design.preview_size", PlayPlace.PREVIEW_SIZE), -- zgx-lint: allow(state-in-component)
+		live = ui.use_state(nil :: any), -- the size while an edge is dragged
+		hgt = ui.use_state(0), -- the editor's height
+		n = 0,
+		api = nil,
+		shown = nil, -- the Screen it shows
+	}
+	-- The Screen (top-level frame, not a component) holding layer `id`.
+	function pre.screen_of(id: string?): string?
+		if not (id and api and api.index) then
+			return nil
+		end
+		local ix = api.index:peek()
+		local n = ix.by[id]
+		while n and n.parent ~= "" and ix.by[n.parent] do
+			n = ix.by[n.parent]
+		end
+		return if n and n.it.t == "frame" and not n.it.comp then n.id else nil
+	end
+	function pre.close()
+		if pre.on:peek() then
+			pre.on:set(nil)
+		end
+		pre.api, pre.shown = nil, nil
+		if props.expose_preview then
+			props.expose_preview(nil)
+		end
+	end
+	local function play_from(start: string, flow: string?)
+		play_menu:set(false)
+		pre.close() -- (step 6 P4: full Play closes the Preview)
+		playing:set({ start = start, flow = flow, n = (playing:peek() and playing:peek().n or 0) + 1 })
+	end
+	local function start_play(from_menu: boolean?)
+		local ids = source.selection:peek() or {}
+		local sel_screen = pre.screen_of(ids[1])
+		local flows = flows_list()
+		if sel_screen and not from_menu then
+			local fname = nil
+			for _, f in flows do
+				if f.start == sel_screen then
+					fname = f.name
+				end
+			end
+			play_from(sel_screen, fname)
+		elseif #flows > 1 and not from_menu then
+			play_menu:set(true)
+		elseif #flows >= 1 then
+			play_from(flows[1].start, flows[1].name)
+		else
+			local list = screens_list()
+			if list[1] then
+				play_from(list[1].id, nil)
+			else
+				Toast.show { icon = "play", title = "Nothing to play", body = "The Design has no Screen yet." }
+			end
+		end
+	end
+	-- (step 6 P4) Open the Preview at the selected Screen, else the first
+	-- flow, else the first Screen; or close it.
+	function pre.toggle()
+		if pre.on:peek() then
+			pre.close()
+			if api and api.focus then
+				api.focus()
+			end
+			return
+		end
+		local start = pre.screen_of((source.selection:peek() or {})[1])
+		local flows = flows_list()
+		if not start and flows[1] then
+			start = flows[1].start
+		end
+		if not start then
+			local list = screens_list()
+			start = list[1] and list[1].id
+		end
+		if not start then
+			Toast.show { icon = "play", title = "Nothing to preview", body = "The Design has no Screen yet." }
+			return
+		end
+		local fname = nil
+		for _, f in flows do
+			if f.start == start then
+				fname = f.name
+			end
+		end
+		pre.n += 1
+		pre.shown = start
+		pre.on:set({ start = start, flow = fname, n = pre.n })
+	end
+	-- (a Screen clicked on the canvas: the Preview plays it, no transition)
+	ui.effect(function()
+		local ids = source.selection:get() or {}
+		local s = pre.screen_of(ids[1])
+		if s and pre.api and s ~= pre.shown then
+			pre.shown = s
+			ui.after(0, function()
+				if pre.api then
+					pre.api.jump(s)
+				end
+			end)
+		end
+	end)
+	-- The island's size now (dragged, else kept), inside the editor.
+	function pre.wh(): (number, number)
+		local s = pre.live:get() or pre.size:get() or PlayPlace.PREVIEW_SIZE
+		local maxh = math.max(PlayPlace.PREVIEW_MIN.h, pre.hgt:get() - ROW2 - E)
+		return s.w, math.min(s.h, maxh)
+	end
 
 	-- Top right, the theme bar (h40 r12, p4 gap 6): the Design's Themes as a
 	-- segmented control (the first axis's values: Light | Dark; the one in
@@ -1289,6 +1447,76 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 		gap = 6,
 		direction = "row",
 		items = "center",
+		-- ▶ Play (Ctrl+Enter); several flows: which one.
+		(function(): Node
+			local mp: any = {
+				open = play_menu,
+				label = "Play a flow",
+				anchor = ui.button {
+					id = "play-toggle",
+					label = "Play prototype",
+					tooltip = Kit.tip(L, "Play  Ctrl Enter"),
+					tooltip_placement = { side = "bottom", align = "end", offset = 8 },
+					w = 32,
+					h = 32,
+					p = 0,
+					rounded = 8,
+					border = 0,
+					items = "center",
+					justify = "center",
+					focus = { outline = 0 },
+					color = L.muted,
+					bg = CLEAR,
+					hover = { bg = L.hover },
+					on_click = function()
+						start_play()
+					end,
+					Kit.icon("play", 15),
+				},
+				Kit.menu_head(L, "Play a flow"),
+			}
+			table.insert(
+				mp,
+				ui.each(ui.computed(function(): { any }
+					return if source.flows then source.flows:get() or {} else {}
+				end), function(f: any): Node
+					return Kit.menu_item(L, { label = f.name or "Flow", on_click = function()
+						play_from(f.start, f.name)
+					end })
+				end)
+			)
+			for k2, v2 in Kit.pop_style(L) do
+				mp[k2] = v2
+			end
+			mp.w = 220
+			return ui.menu(mp)
+		end)(),
+		-- (step 6 P4) the inline Preview (Shift+Space)
+		ui.button {
+			id = "preview-toggle",
+			label = "Preview",
+			tooltip = Kit.tip(L, "Preview  ⇧ Space"),
+			tooltip_placement = { side = "bottom", align = "end", offset = 8 },
+			w = 32,
+			h = 32,
+			p = 0,
+			rounded = 8,
+			border = 0,
+			items = "center",
+			justify = "center",
+			focus = { outline = 0 },
+			color = function(): string
+				return if pre.on:get() then L.accent else L.muted
+			end,
+			bg = function(): string
+				return if pre.on:get() then L.accent_soft else CLEAR
+			end,
+			hover = { bg = L.hover },
+			on_click = function()
+				pre.toggle()
+			end,
+			Kit.icon("smartphone", 15),
+		},
 		ui.presence(function(): string
 			local t = tokens:get()
 			return if t and t.axes and #t.axes > 0 then "themes" else "none"
@@ -1333,21 +1561,102 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 		w = RW,
 		rounded = Look.RIGHT_R,
 		overflow = "hidden",
+		direction = "column",
+		-- Design | Prototype, as Figma's (h40: two text tabs, the chosen one fg).
+		ui.row {
+			id = "panel-tabs",
+			w_full = true,
+			h = 40,
+			shrink = 0,
+			px = 6,
+			gap = 2,
+			items = "center",
+			border_sides = { 0, 0, 1, 0 },
+			border_color = L.border,
+			(function(): Node
+				local function tab(value: string, label: string): Node
+					local function on(): boolean
+						return panel_tab:get() == value
+					end
+					return ui.button {
+						id = `panel-tab-{value}`,
+						label = label,
+						h = 28,
+						px = 8,
+						rounded = 8,
+						border = 0,
+						items = "center",
+						focus = { outline = 0 },
+						bg = function(): string
+							return if on() then L.field else CLEAR
+						end,
+						hover = { bg = L.hover },
+						on_click = function()
+							panel_tab:set(value)
+						end,
+						ui.text {
+							label,
+							text_size = 12,
+							weight = 500,
+							font = Look.UI,
+							color = function(): string
+								return if on() then L.fg else L.muted
+							end,
+						},
+					}
+				end
+				return ui.row { gap = 2, items = "center", grow = 1, tab("design", "Design"), tab("prototype", "Prototype") }
+			end)(),
+			ui.button {
+				id = "props-hide",
+				label = "Hide properties",
+				tooltip = "Hide properties",
+				w = 28,
+				h = 28,
+				p = 0,
+				rounded = 8,
+				border = 0,
+				items = "center",
+				justify = "center",
+				bg = CLEAR,
+				hover = { bg = L.hover },
+				color = L.muted,
+				focus = { outline = 0 },
+				on_click = function()
+					props_open:set(false)
+				end,
+				Kit.icon("panelRight", 14),
+			},
+		},
 		ui.scroll {
 			w_full = true,
-			h_full = true,
+			grow = 1,
+			min_h = 0,
 			ui.presence(function(): string
-				return infos:get().key
+				return infos:get().key .. "|" .. panel_tab:get()
 			end, function(_: string): Node
+				if panel_tab:peek() == "prototype" then
+					return ui.component(function(): Node
+						return ProtoPanel.Panel {
+							L = L,
+							source = source,
+							infos = infos:peek().list,
+							tokens = tokens:peek(),
+							show_all = show_all_links,
+							eyedrop = function(done: any)
+								if api then
+									api.eyedrop(done)
+								end
+							end,
+						}
+					end)({})
+				end
 				return ui.component(function(): Node
 					return Props.Props {
 						L = L,
 						source = source,
 						infos = infos:peek().list,
 						tokens = tokens:peek(),
-						on_toggle = function()
-							props_open:set(false)
-						end,
 						select = function(ids: { string })
 							source.selection:set(ids)
 						end,
@@ -1754,15 +2063,21 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			{ section = "Edit", label = "Copy", icon = "copy", keys = { "Ctrl", "C" }, why = has_sel, run = function()
 				if source.copy then
 					source.copy(sel_ids(), false)
+					IaClip.layers_copied()
 				end
 			end },
 			{ section = "Edit", label = "Cut", icon = "copy", keys = { "Ctrl", "X" }, why = has_sel, run = function()
 				if source.copy then
 					source.copy(sel_ids(), true)
+					IaClip.layers_copied()
 					source.selection:set({})
 				end
 			end },
 			{ section = "Edit", label = "Paste", icon = "copy", keys = { "Ctrl", "V" }, run = function()
+				-- (F6 C3) interactions copied last: appended to the selection
+				if api and api.paste_interactions and api.paste_interactions() then
+					return
+				end
 				local ids = sel_ids()
 				edit({ { op = "paste", into = if #ids == 1 then ids[1] else nil } }, "Paste")
 			end },
@@ -1820,6 +2135,16 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			{ section = "View", label = "Variables", icon = "braces", run = function()
 				vars_open:set(not vars_open:peek())
 			end },
+			{ section = "Prototype", label = "Play prototype", icon = "play", keys = { "Ctrl", "Enter" }, run = function()
+				start_play()
+			end },
+			{ section = "Prototype", label = "Preview", icon = "smartphone", keys = { "⇧", "Space" }, run = function()
+				pre.toggle()
+			end },
+			{ section = "Prototype", label = "Show prototype panel", icon = "click", run = function()
+				panel_tab:set("prototype")
+				props_open:set(true)
+			end },
 			{ section = "Help", label = "Keyboard shortcuts", icon = "keyboard", keys = { "?" }, run = function()
 				shortcuts_open:set(true)
 			end },
@@ -1836,6 +2161,7 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 		{ name = "App", sections = {
 			{ title = "General", rows = { { label = "Command palette", keys = { "Ctrl", "P" } }, { label = "Keyboard shortcuts", keys = { "?" } }, { label = "Find layers", keys = { "Ctrl", "F" } } } },
 			{ title = "History", rows = { { label = "Undo", keys = { "Ctrl", "Z" } }, { label = "Redo", keys = { "Ctrl", "⇧", "Z" } } } },
+			{ title = "Prototype", rows = { { label = "Play", keys = { "Ctrl", "Enter" } }, { label = "Preview", keys = { "⇧", "Space" } }, { label = "Back (playing)", keys = { "←" } }, { label = "Restart (playing)", keys = { "R" } }, { label = "Close (playing)", keys = { "Esc" } } } },
 		} },
 		{ name = "Tools", sections = {
 			{ title = "Tools", rows = { { label = "Move", keys = { "V" } }, { label = "Rectangle", keys = { "R" } }, { label = "Ellipse", keys = { "O" } }, { label = "Line", keys = { "L" } }, { label = "Pen", keys = { "P" } } } },
@@ -1911,6 +2237,173 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 		end,
 	}
 
+	-- (step 6 P4) The Preview's island: left of the properties (at the edge
+	-- without them), under the top bar; Play inside, remade per opening. Its
+	-- left edge, bottom edge and bottom-left corner resize it (Shift keeps
+	-- the ratio); the size is kept on release.
+	function pre.cursor(edge: string?): string
+		return if edge == "l" then "ew_resize" elseif edge == "b" then "ns_resize" else "nesw_resize"
+	end
+	pre.dragging = ui.use_state(nil :: string?) -- the edge being dragged
+	function pre.drag_move(e: any)
+		local d = pre.drag
+		if d then
+			local maxw = math.max(PlayPlace.PREVIEW_MIN.w, width:peek() - (if props_shown:peek() then E + RW + I else E) - 320)
+			local maxh = math.max(PlayPlace.PREVIEW_MIN.h, pre.hgt:peek() - ROW2 - E)
+			pre.live:set(PlayPlace.preview_resize(d, d.edge, e.x - d.x, e.y - d.y, e.shift == true, { w = maxw, h = maxh }))
+		end
+	end
+	function pre.drag_end()
+		if pre.drag then
+			pre.drag = nil
+			pre.dragging:set(nil)
+			local s = pre.live:peek()
+			if s then
+				pre.size:set(s)
+				pre.live:set(nil)
+			end
+		end
+	end
+	function pre.edge(edge: string): Node
+		-- (l: the left edge; b: the bottom; lb: the corner, over both)
+		local at: any = if edge == "l"
+			then { left = -4, w = 8, top = 12, bottom = 12 }
+			elseif edge == "b" then { left = 12, right = 0, bottom = -4, h = 8 }
+			else { left = -4, bottom = -4, w = 14, h = 14 }
+		return ui.div {
+			id = `preview-resize-{edge}`,
+			label = "Resize preview",
+			absolute = true,
+			left = at.left,
+			right = at.right,
+			top = at.top,
+			bottom = at.bottom,
+			w = at.w,
+			h = at.h,
+			z = 60,
+			cursor = pre.cursor(edge),
+			on_press = function(e: any)
+				local w, h = pre.wh()
+				pre.drag = { x = e.x, y = e.y, w = w, h = h, edge = edge }
+				pre.dragging:set(edge)
+			end,
+			on_pointer_move = pre.drag_move,
+			on_release = pre.drag_end,
+		}
+	end
+	-- While an edge is dragged: the whole window takes the pointer (a move
+	-- past the thin edge still resizes; the release anywhere ends it).
+	function pre.shield(): Node
+		return ui.div {
+			id = "preview-resize-shield",
+			absolute = true,
+			left = 0,
+			top = 0,
+			right = 0,
+			bottom = 0,
+			z = 100,
+			cursor = function(): string
+				return pre.cursor(pre.dragging:get())
+			end,
+			on_pointer_move = pre.drag_move,
+			on_release = pre.drag_end,
+		}
+	end
+	function pre.island(): Node
+		return Kit.island(L, {
+			id = "preview",
+			right = function(): number
+				return if props_shown:get() then E + RW + I else E
+			end,
+			top = ROW2,
+			w = function(): number
+				return (pre.wh())
+			end,
+			h = function(): number
+				local _, h = pre.wh()
+				return h
+			end,
+			rounded = 12,
+			direction = "column",
+			ui.div {
+				id = "preview-body",
+				w_full = true,
+				h_full = true,
+				-- (step 6 P6) a square clip: a rounded one is a mask composited
+				-- every frame (about 1-1.5 ms a frame in pure/anim/f6/p4/film).
+				-- Play rounds its own background instead, and its Screen keeps
+				-- 8 pt in, clear of the 12 pt corners.
+				overflow = "hidden",
+				ui.presence(function(): string
+					local p = pre.on:get()
+					return if p then `preview{p.n}` else "none"
+				end, function(which: string): Node
+					local p = pre.on:peek()
+					if which == "none" or not p then
+						return ui.div {}
+					end
+					return ui.component(function(): Node
+						return Play.Play {
+							L = L,
+							source = source,
+							start = p.start,
+							flow = p.flow,
+							id = props.id,
+							log = props.log,
+							mode = "preview",
+							expose = function(a: any)
+								pre.api = a
+								if props.expose_preview then
+									props.expose_preview(a)
+								end
+							end,
+							on_shown = function(id: string, follow: boolean)
+								pre.shown = id
+								if follow and api and pre.screen_of((source.selection:peek() or {})[1]) ~= id then
+									-- (Follow prototype: the canvas selects and shows it)
+									ui.after(0, function()
+										if api then
+											api.select({ id })
+											api.zoom_to_root(id)
+										end
+									end)
+								end
+							end,
+							on_play = function(id: string)
+								local fname = nil
+								for _, f in flows_list() do
+									if f.start == id then
+										fname = f.name
+									end
+								end
+								play_from(id, fname)
+							end,
+							on_100 = function(w: number, h: number)
+								-- (+2: the island's rim)
+								local maxh = math.max(PlayPlace.PREVIEW_MIN.h, pre.hgt:peek() - ROW2 - E)
+								pre.size:set({ w = math.max(PlayPlace.PREVIEW_MIN.w, w + 2), h = math.clamp(h + 2, PlayPlace.PREVIEW_MIN.h, maxh) })
+							end,
+							on_escape = function()
+								if api and api.focus then
+									api.focus()
+								end
+							end,
+							on_close = function()
+								pre.close()
+								if api and api.focus then
+									api.focus()
+								end
+							end,
+						}
+					end)({})
+				end, { absolute = true, left = 0, top = 0, right = 0, bottom = 0 }),
+			},
+			pre.edge("l"),
+			pre.edge("b"),
+			pre.edge("lb"),
+		})
+	end
+
 	return ui.overlay {
 		id = `design-editor-{props.id or "design"}`,
 		w_full = true,
@@ -1937,6 +2430,23 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			elseif key == "Escape" and shortcuts_open:peek() then
 				shortcuts_open:set(false)
 				return true
+			elseif k.shift and not k.cmd and (key == " " or key == "Space") then
+				-- (step 6 P4) the inline Preview, as Figma's
+				pre.toggle()
+				return true
+			elseif k.cmd and key == "Enter" then
+				-- Play (pen.dev's start-presentation key; Figma's is Ctrl+Alt+Enter).
+				if playing:peek() then
+					playing:set(nil)
+				else
+					start_play()
+				end
+				return true
+			end
+			-- Enter or Space on a focused panel button presses it (the Canvas's
+			-- Enter would select children and rebuild the panel instead).
+			if (key == "Enter" or key == " ") and not k.cmd and not k.alt and Pointer.button_focused() then
+				return nil
 			end
 			-- anything else: the Canvas's shortcuts (Shift+1, Delete, V, …)
 			if api and api.key then
@@ -1948,6 +2458,9 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			if math.abs(width:peek() - sz.w) >= 1 then
 				width:set(sz.w)
 			end
+			if math.abs(pre.hgt:peek() - sz.h) >= 1 then
+				pre.hgt:set(sz.h)
+			end
 		end,
 		Canvas {
 			source = source,
@@ -1956,6 +2469,19 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			tool = tool,
 			chrome = false,
 			log = props.log,
+			proto = function(): boolean
+				return panel_tab:get() == "prototype" and props_open:get()
+			end,
+			-- Shift+Space (F6 P4): the inline Preview (before Space's pan).
+			on_preview = function()
+				pre.toggle()
+			end,
+			-- Shift+E (F6 C1): Design ⇄ Prototype, opening the properties.
+			on_panel_tab = function()
+				panel_tab:set(if panel_tab:peek() == "prototype" then "design" else "prototype")
+				props_open:set(true)
+			end,
+			show_all = show_all_links,
 			context_menu = context_menu,
 			menu_style = (function(): any
 				local st = Kit.pop_style(L)
@@ -1975,12 +2501,16 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 				return {
 					l = if left_open:peek() then PANEL_X + left_w:peek() + I else PANEL_X,
 					t = 0,
-					r = if props_shown:peek() then E + RW + I else 0,
+					r = (if props_shown:peek() then E + RW + I else 0) + (if pre.on:peek() then (pre.wh()) + I + (if props_shown:peek() then 0 else E) else 0),
 					b = 0,
 				}
 			end,
 			expose = function(a: any)
 				api = a
+				-- (step 6 P4: the Preview's toggle, for tests and the film)
+				a.toggle_preview = function()
+					pre.toggle()
+				end
 				if props.expose then
 					props.expose(a)
 				end
@@ -2015,6 +2545,50 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			return shortcuts_open:get()
 		end, shortcuts),
 		zoom,
+		-- Play: over the editor, which stays mounted under it (closing is
+		-- instant and keeps the selection).
+		ui.show(function(): boolean
+			return playing:get() ~= nil
+		end, ui.presence(function(): string
+			local p = playing:get()
+			return if p then `play{p.n}` else "none"
+		end, function(which: string): Node
+			if which == "none" then
+				return ui.div {}
+			end
+			local p = playing:peek()
+			return ui.component(function(): Node
+				return Play.Play {
+					L = L,
+					source = source,
+					start = p.start,
+					flow = p.flow,
+					id = props.id, -- (step 6 P1: Play keeps its scaling choice per Design)
+					log = props.log,
+					expose = function(a: any)
+						if props.expose_play then
+							props.expose_play(a)
+						end
+					end,
+					on_close = function()
+						playing:set(nil)
+						if props.expose_play then
+							props.expose_play(nil)
+						end
+						if api and api.focus then
+							api.focus()
+						end
+					end,
+				}
+			end)({})
+		end, { absolute = true, left = 0, top = 0, right = 0, bottom = 0 })),
+		-- (step 6 P4) the inline Preview's island
+		ui.show(function(): boolean
+			return pre.on:get() ~= nil
+		end, pre.island()),
+		ui.show(function(): boolean
+			return pre.dragging:get() ~= nil
+		end, pre.shield()),
 		Toast.Stack { L = L },
 	}
 end

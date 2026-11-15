@@ -89,4 +89,17 @@ function M.Error(L: any, o: { title: string, body: string?, retry: () -> (), oth
 	})
 end
 
+-- The Design was deleted while its tab was open. Plugins can't close a
+-- panel tab, so it says how, and offers "All designs" (when `other`).
+function M.Deleted(L: any, o: { name: string, other: (() -> ())? }): Node
+	return frame(L, "design-deleted", {
+		M.icon("trash", 22, L.faint),
+		ui.text { "This design was deleted", text_size = 14, weight = 600, color = L.fg, font = Look.UI, align = "center" },
+		ui.text { `“{o.name}” is gone. Close this tab with its × or Ctrl+W.`, text_size = 12, color = L.muted, font = Look.UI, align = "center", wrap = "balance", w = 300, line_height = 18 },
+		if o.other
+			then ui.row { gap = 8, items = "center", mt = 6, Kit.button(L, { id = "design-deleted-all", label = "All designs", icon = "layers", on_click = o.other }) }
+			else ui.div {},
+	})
+end
+
 return M

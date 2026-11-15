@@ -8,6 +8,7 @@ local U = require("./util")
 local Resolve = require("./resolve")
 local Layout = require("./layout")
 local Text = require("./text")
+local Proto = require("./proto")
 
 local M = {}
 
@@ -18,7 +19,7 @@ local FIXED = { id = true, type = true, ref = true }
 
 local SHAPE = { width = true, height = true, fill = true, stroke = true, effect = true }
 local KNOWN = {
-	frame = { layout = true, gap = true, padding = true, justifyContent = true, alignItems = true, cornerRadius = true, clip = true, reusable = true, children = true },
+	frame = { layout = true, gap = true, padding = true, justifyContent = true, alignItems = true, cornerRadius = true, clip = true, reusable = true, children = true, overflow = true, overlay = true, variant = true },
 	rectangle = { cornerRadius = true },
 	ellipse = { startAngle = true, sweepAngle = true, innerRadius = true },
 	polygon = { polygonCount = true },
@@ -26,7 +27,7 @@ local KNOWN = {
 	text = { content = true, fontFamily = true, fontSize = true, fontWeight = true, lineHeight = true, letterSpacing = true, textAlign = true, textAlignVertical = true, textGrowth = true, underline = true, strikethrough = true, stroke = false, effect = false },
 	icon = { icon = true, weight = true, stroke = false, effect = false },
 }
-local ALWAYS = { type = true, locked = true, inProgressBy = true, lint = true, lintIgnore = true }
+local ALWAYS = { type = true, locked = true, inProgressBy = true, lint = true, lintIgnore = true, states = true, interactions = true, scroll = true, match = true }
 
 local function known(t: string, key: string): boolean
 	if Resolve.COMMON[key] or ALWAYS[key] then
@@ -56,13 +57,19 @@ D.__index = D
 
 -- A draft over the held Design `d` (designs.luau).
 function M.draft(d: any): any
-	local self = setmetatable({ d = d, created = {}, changed = {}, changed_list = {}, warnings = {}, printed = {}, screenshots = {}, exported = {}, ids = {}, index = nil, deleted = {}, returned = {} }, D)
+	local self = setmetatable({ d = d, created = {}, changed = {}, changed_list = {}, warnings = {}, printed = {}, screenshots = {}, exported = {}, ids = {}, index = nil, deleted = {}, returned = {}, linked = {} }, D)
 	Resolve.walk(d.doc.children, function(n)
 		if type(n.id) == "string" then
 			self.ids[n.id] = true
 		end
+		-- ids links already name (a link kept to a deleted Screen stays legal)
+		if n.interactions ~= nil or n.descendants ~= nil then
+			Proto.targets_in(n.interactions, self.linked)
+			Proto.targets_in(n.descendants, self.linked)
+		end
 		return true
 	end)
+	Proto.targets_in(d.doc.flows, self.linked)
 	return self
 end
 
@@ -218,6 +225,11 @@ function D:prepare(node: any, verb: string, made: { any }): any
 	if t == "instance" and (type(out.ref) ~= "string" or out.ref == "") then
 		self:fail(`{verb}: an instance needs a "ref": its Component's id`)
 	end
+	-- (step 5) variant properties bound to variables
+	if t == "instance" and type(out.props) == "table" and Resolve.refers(out.props) then
+		out.props = self:bound_props(out.ref, out.props, verb)
+		self.proto_touched = true
+	end
 	table.insert(made, { name = name, id = out.id })
 	if out.children ~= nil then
 		if t ~= "frame" then
@@ -228,6 +240,9 @@ function D:prepare(node: any, verb: string, made: { any }): any
 			table.insert(kids, self:prepare(c, verb, made))
 		end
 		out.children = if #kids > 0 then kids else nil
+	end
+	if Proto.has(out) then
+		self.proto_touched = true
 	end
 	for k in out do
 		if not known(t, k) then
@@ -257,6 +272,7 @@ function D:check_values(n: any, verb: string)
 	if n.layout ~= nil and n.layout ~= "none" and n.layout ~= "horizontal" and n.layout ~= "vertical" and not Resolve.refers(n.layout) then
 		self:fail(`{verb}: layout is "none", "horizontal" or "vertical", not {tostring(n.layout)}`)
 	end
+	self:check_proto(n)
 	local dead = M.inert(n)
 	if dead then
 		self:warn(n.id, dead[1], `"{tostring(n.name)}": {table.concat(dead, ", ")} do nothing on a Frame without a layout: set layout = "vertical" or "horizontal", or drop them`)
@@ -267,6 +283,207 @@ function D:check_values(n: any, verb: string)
 			self:warn(n.id, "fontFamily", `"{n.name}": the font "{tostring(n.fontFamily)}" isn't available to Design (pure); its text draws in {Text.DEFAULT_FAMILY}`)
 		end
 	end
+end
+
+-- Why `id` can't be a link's target, or nil: a Screen (a top-level frame
+-- that isn't a Component), or an id a link already named (kept dangling,
+-- so undoing the delete brings the link back).
+function D:link_target(id: string, kind: string?): string?
+	local f = self:find(id)
+	if kind == "variant" then
+		-- (step 4) a Change to's target: a Component in a variant set
+		if f then
+			local n = f.node
+			if n.type ~= "frame" or n.reusable ~= true or f.parent ~= nil then
+				return ` (it's a {if n.reusable == true then "Component inside another node" else tostring(n.type)}; change to a Component of a set: MakeVariants makes one)`
+			elseif type(n.variant) ~= "table" then
+				return ` (the Component "{tostring(n.name)}" is in no variant set: MakeVariants, or Update(id, \{ variant = \{ set, props \} \}))`
+			end
+			return nil
+		end
+		if self.linked[id] or self.lenient_links then
+			return nil
+		end
+		return if self.deleted[id] then ` ("{self.deleted[id]}" was deleted earlier in this call)` else ": no node has that id"
+	end
+	if f then
+		local n = f.node
+		if f.parent ~= nil then
+			return ` (it's a {tostring(n.type)} inside "{tostring(f.parent.name)}"; link to a top-level frame)`
+		elseif n.type ~= "frame" then
+			return ` (it's a {tostring(n.type)}; link to a top-level frame)`
+		elseif n.reusable == true then
+			return " (it's a Component; link to a Screen)"
+		end
+		return nil
+	end
+	if self.linked[id] or self.lenient_links then
+		return nil
+	end
+	if self.deleted[id] then
+		return ` ("{self.deleted[id]}" was deleted earlier in this call)`
+	end
+	return ": no node has that id"
+end
+
+-- (step 5) What actions' variables are checked against: { kinds = { [token]
+-- = kind }, themes }. Cached until the Tokens or Themes change.
+function D:var_ctx(): any
+	if not self.var_ctx_ then
+		local kinds = {}
+		for name, tok in (self.d.doc.tokens or {}) do
+			local t = Resolve.read_token(name, tok)
+			if t then
+				kinds[name] = t.kind
+			end
+		end
+		self.var_ctx_ = { kinds = kinds, themes = self.d.doc.themes or {} }
+	end
+	return self.var_ctx_
+end
+
+-- (step 5) An Instance's variant properties bound to variables (`props =
+-- { On = "$isOn" }`, literal values allowed beside them): its set must have
+-- those properties. Returns the props to store.
+function D:bound_props(ref: string, props: any, verb: string): any
+	local vs = Proto.variant_sets(self.d.doc)
+	local set = vs.of[ref]
+	if not set then
+		local f = self:find(ref)
+		self:fail(`{verb}: the Instance's Component "{tostring(f and f.node.name or ref)}" is in no variant set, so it has no props to bind (MakeVariants makes a set)`)
+	end
+	local names = {}
+	for _, m in vs.sets[set].members do
+		for k in vs.sets[set].props[m] do
+			names[k] = true
+		end
+	end
+	local out = {}
+	for k, v in props do
+		if type(k) ~= "string" or not names[k] then
+			local have = {}
+			for n in names do
+				table.insert(have, n)
+			end
+			table.sort(have)
+			self:fail(`{verb}: the set "{set}" has no property "{tostring(k)}" (it has {table.concat(have, ", ")})`)
+		end
+		if not Resolve.reference(v) and not Proto.prop_value(v) then
+			self:fail(`{verb}: props.{k} is a value ("true", "Default") or a variable "$name", not {tostring(v)}`)
+		end
+		out[k] = if Resolve.reference(v) then v else Proto.prop_value(v)
+	end
+	return out
+end
+
+-- The prototype keys of a stored node (or an override table), checked.
+function D:check_proto(n: any, prefix: string?)
+	if type(n) ~= "table" then
+		return
+	end
+	local pre = prefix or ""
+	local fail = function(msg)
+		self:fail(msg)
+	end
+	local target = function(id, kind)
+		return self:link_target(id, kind)
+	end
+	-- (step 4) a Component's variant: its set and property values
+	if n.variant ~= nil and not U.is_null(n.variant) then
+		if prefix ~= nil or (n.type ~= nil and n.type ~= "frame") then
+			self:fail(`{pre}variant goes on a Component (a top-level frame with reusable = true)`)
+		end
+		Proto.check_variant(n.variant, pre .. "variant", fail)
+		if n.reusable ~= true then
+			self:warn(n.id, "variant", `"{tostring(n.name)}" has a variant but isn't a Component (reusable = true): it's in no set`)
+		end
+		self.proto_touched = true
+	end
+	if n.states ~= nil and not U.is_null(n.states) then
+		Proto.check_states(n.states, pre .. "states", fail)
+	end
+	if n.interactions ~= nil and not U.is_null(n.interactions) then
+		Proto.check_interactions(n.interactions, pre .. "interactions", fail, target, self:var_ctx())
+	end
+	-- (step 5) visibility bound to a variable: true, false or "$name"
+	if n.enabled ~= nil and not U.is_null(n.enabled) and type(n.enabled) ~= "boolean" and not Resolve.reference(n.enabled) then
+		self:fail(`{pre}enabled is true, false or a boolean variable "$name", not {tostring(n.enabled)}`)
+	end
+	-- scrolling (step 2): overflow on frames, scroll on any layer
+	if n.overflow ~= nil then
+		if n.type ~= nil and n.type ~= "frame" and n.type ~= "instance" and not U.is_null(n.overflow) then
+			self:fail(`{pre}overflow scrolls a frame's content: "{tostring(n.name)}" is a {tostring(n.type)}; wrap its content in a frame and give that the overflow`)
+		end
+		Proto.check_overflow(n.overflow, pre .. "overflow", fail)
+	end
+	if n.scroll ~= nil then
+		Proto.check_scroll(n.scroll, pre .. "scroll", fail)
+	end
+	-- Smart Animate (step 3): a match key that overrides the name path
+	if n.match ~= nil and not U.is_null(n.match) then
+		Proto.check_match(n.match, pre .. "match", fail)
+	end
+	-- overlays (step 2): a frame's overlay settings
+	if n.overlay ~= nil and not U.is_null(n.overlay) then
+		if n.type ~= nil and n.type ~= "frame" then
+			self:fail(`{pre}overlay settings go on a top-level frame: "{tostring(n.name)}" is a {tostring(n.type)}`)
+		end
+		Proto.check_overlay(n.overlay, pre .. "overlay", fail)
+		self.proto_touched = true
+	end
+	if n.type == "instance" and type(n.descendants) == "table" and prefix == nil then
+		for key, ov in n.descendants do
+			if type(ov) == "table" then
+				self:check_proto(ov, `descendants.{tostring(key)}.`)
+			end
+		end
+	end
+end
+
+-- The Design's flows ({ {name, start} }; nil or {} clears).
+function D:set_flows(list: any)
+	if list == nil or U.is_null(list) or (type(list) == "table" and next(list) == nil) then
+		self.d.doc.flows = nil
+	else
+		Proto.check_flows(list, function(msg)
+			self:fail(msg)
+		end, function(id)
+			return self:link_target(id)
+		end)
+		local clean = {}
+		for _, f in list do
+			-- (step 6) a flow's description, plain text
+			local desc = if type(f.description) == "string" and f.description ~= "" then f.description else nil
+			table.insert(clean, { name = f.name, start = f.start, description = desc })
+		end
+		self.d.doc.flows = clean
+	end
+	self.proto_touched = true
+	self.flows_changed = true
+end
+
+-- The Design's prototype settings ({ device, rotate, fit, background };
+-- nil, "__null" or {} clears). `merge`: keys given replace those kept.
+function D:set_prototype(p: any, merge: boolean?)
+	if p == nil or U.is_null(p) or (type(p) == "table" and next(p) == nil) then
+		self.d.doc.prototype = nil
+		self.proto_touched = true
+		return
+	end
+	if type(p) == "table" and merge and type(self.d.doc.prototype) == "table" then
+		p = Proto.merge_prototype(self.d.doc.prototype, p)
+	end
+	Proto.check_prototype(p, function(msg)
+		self:fail(msg)
+	end)
+	local clean = {}
+	for k, v in p do
+		if not U.is_null(v) then
+			clean[k] = U.deep_copy(v)
+		end
+	end
+	self.d.doc.prototype = if next(clean) ~= nil then clean else nil
+	self.proto_touched = true
 end
 
 function D:attach(list: any, index: number?, node: any, made: { any })
@@ -320,7 +537,74 @@ end
 
 -- Sets props on a stored node (no id/type/ref/children changes). An
 -- Instance's `descendants` merge into the ones it has unless `replace`.
+-- (step 4) The member of `ref`'s set an Instance switches to: `props`
+-- (some property values, the rest kept as far as a member has them) or a
+-- new `ref` in the same set. Fails when there's none.
+function D:variant_member(ref: string, props: any, new_ref: any, verb: string): string
+	local vs = Proto.variant_sets(self.d.doc)
+	local set = vs.of[ref]
+	if not set then
+		local f = self:find(ref)
+		self:fail(`{verb}: the Instance's Component "{tostring(f and f.node.name or ref)}" is in no variant set, so it has no props to switch (MakeVariants makes a set)`)
+	end
+	if new_ref ~= nil then
+		if vs.of[new_ref] ~= set then
+			self:fail(`{verb} can change an Instance's "ref" only to another variant of its set "{set}" (Replace puts a new node in its place)`)
+		end
+		return new_ref
+	end
+	if type(props) ~= "table" or next(props) == nil then
+		self:fail(`{verb}: props is \{ Name = "value" \}, the variant's property values`)
+	end
+	local id = Proto.variant_find(vs, set, props, vs.sets[set].props[ref])
+	if not id then
+		local have = {}
+		for _, m in vs.sets[set].members do
+			local parts = {}
+			for k, v in vs.sets[set].props[m] do
+				table.insert(parts, `{k}={v}`)
+			end
+			table.sort(parts)
+			table.insert(have, table.concat(parts, " "))
+		end
+		self:fail(`{verb}: the set "{set}" has no variant with those props; it has: {table.concat(have, "; ")}`)
+	end
+	return id :: string
+end
+
 function D:set(node: any, props: any, verb: string, replace: boolean?)
+	-- (step 5) variant properties bound to variables stay on the Instance
+	-- (`props = { On = "$isOn" }`); null drops the binding
+	if node.type == "instance" and props.props ~= nil and (U.is_null(props.props) or Resolve.refers(props.props)) then
+		node.props = if U.is_null(props.props) then nil else self:bound_props(node.ref, props.props, verb)
+		props = table.clone(props)
+		props.props = nil
+		self.proto_touched = true
+	elseif node.type == "instance" and type(props.props) == "table" and type(node.props) == "table" then
+		-- (a literal value given for a bound property replaces the binding)
+		for k in props.props do
+			node.props[k] = nil
+		end
+		if next(node.props) == nil then
+			node.props = nil
+		end
+	end
+	if node.type == "instance" and (props.props ~= nil or (props.ref ~= nil and props.ref ~= node.ref)) then
+		local to = self:variant_member(node.ref, props.props, if props.ref ~= node.ref then props.ref else nil, verb)
+		props = table.clone(props)
+		props.props, props.ref = nil, nil
+		if to ~= node.ref then
+			local old, new = self:find(node.ref), self:find(to)
+			if type(node.descendants) == "table" and old and new then
+				node.descendants = Resolve.rekey(node.descendants, old.node, new.node)
+			end
+			node.ref = to
+			self.proto_touched = true
+		end
+	end
+	if props.states ~= nil or props.interactions ~= nil or (type(props.descendants) == "table" and next(props.descendants) ~= nil) then
+		self.proto_touched = true
+	end
 	for k, v in props do
 		if k == "descendants" and node.type == "instance" and not replace and type(v) == "table" and v ~= U.NULL then
 			merge_descendants(node, v)
@@ -373,7 +657,23 @@ function D:update_inside(id: string, props: any)
 	if type(inst.descendants) ~= "table" then
 		inst.descendants = {}
 	end
+	-- (step 4) a nested Instance switched to another variant: its `ref`
+	-- (step 5) bound variant properties stay in the override as `props`
+	if drawn.__inst and props.props ~= nil and Resolve.refers(props.props) then
+		props = table.clone(props)
+		props.props = self:bound_props(drawn.__inst, props.props, "Update")
+		self.proto_touched = true
+	elseif drawn.__inst and (props.props ~= nil or (props.ref ~= nil and props.ref ~= drawn.__inst)) then
+		local to = self:variant_member(drawn.__inst, props.props, if props.ref ~= drawn.__inst then props.ref else nil, "Update")
+		props = table.clone(props)
+		props.props = nil
+		props.ref = to
+	end
 	local clean, unset = {}, {}
+	self:check_proto(props)
+	if props.states ~= nil or props.interactions ~= nil then
+		self.proto_touched = true
+	end
 	for k, v in props do
 		if k ~= "id" and k ~= "children" then
 			clean[k] = if U.is_null(v) then U.NULL_TEXT else U.deep_copy(v)
@@ -724,9 +1024,12 @@ local PROBLEM_TEXT = {
 	fit_around_fill = "fit content around children that all fill container: sized from their own content, or 100 px each without any",
 }
 
--- The resolved, laid-out roots (all, or the one holding `id`).
-function D:laid_out(id: string?): { any }
-	local r = Resolve.new(self.d.doc, self.d.view_theme)
+-- The resolved, laid-out roots (all, or the one holding `id`). `run`
+-- (step 5, Simulate): { vars, mode }, the prototype's variables at run time.
+function D:laid_out(id: string?, swap: any?, run: any?): { any }
+	local r = Resolve.new(self.d.doc, self.d.view_theme, run)
+	-- (step 4) Play's variant state: { [instance id] = member id }
+	r.swap = swap
 	local ids = nil
 	if id then
 		local top = string.match(id, "^([^/]+)") or id
@@ -743,6 +1046,54 @@ function D:laid_out(id: string?): { any }
 	Layout.run(roots)
 	self.problems = r.problems
 	return roots
+end
+
+-- (B1) A rotation set by an agent turns the layer about its centre, as
+-- Figma's rotation field and the Canvas's rotate handle do. The file keeps
+-- Figma's (and pen's) form: x, y are the turned layer's top-left corner, so
+-- that corner moves. `turns` = { { id, old rotation } }. A layer its
+-- parent's layout places has no x, y of its own and is left as it is.
+function D:turn_about_centre(turns: { any })
+	local laid: { [string]: any } = {}
+	for _, t in turns do
+		local f = self:find(t.id)
+		if not f then
+			continue
+		end
+		local node = f.node
+		local parent = f.parent
+		local new = U.num(node.rotation, 0)
+		if new == t.old or (parent and (parent.layout == "horizontal" or parent.layout == "vertical") and node.absolute ~= true) then
+			continue
+		end
+		local box = laid[t.id]
+		if box == nil then
+			local ok, roots = pcall(self.laid_out, self, t.id)
+			Resolve.walk(if ok then roots else {}, function(n)
+				if n.__box then
+					laid[n.id] = n.__box
+				end
+				return true
+			end)
+			box = laid[t.id]
+		end
+		if box then
+			local function turned(deg: number): (number, number)
+				local a = math.rad(-deg)
+				local px, py = box.w / 2, box.h / 2
+				return math.cos(a) * px - math.sin(a) * py, math.sin(a) * px + math.cos(a) * py
+			end
+			local ox, oy = turned(t.old)
+			local nx, ny = turned(new)
+			local function r2(v: number): number
+				return math.floor(v * 100 + 0.5) / 100
+			end
+			node.x = r2(U.num(node.x, 0) + ox - nx)
+			node.y = r2(U.num(node.y, 0) + oy - ny)
+			self:stale()
+			self:changed_id(t.id)
+		end
+	end
 end
 
 function D:visit(id: string?, visitor: any)
@@ -795,7 +1146,7 @@ function D:visit(id: string?, visitor: any)
 	local function go(n, depth, index, parent, pnode)
 		local b = n.__box
 		local probs = M.problems_of(n, pnode)
-		local info = { bounds = { x = b.x, y = b.y, width = b.w, height = b.h }, depth = depth, index = index, parent = parent, problems = probs, component = n.__inst }
+		local info = { bounds = { x = b.x, y = b.y, width = b.w, height = b.h }, depth = depth, index = index, parent = parent, problems = probs, component = n.__inst, links = Proto.links(n) }
 		local plain = cut(clean_resolved(n), 0)
 		if visitor(plain, info) == false then
 			return
@@ -1078,6 +1429,7 @@ function D:set_tokens(tokens: any, replace: boolean?)
 	end
 	doc.tokens = now
 	self.tokens_changed = true
+	self.var_ctx_ = nil
 end
 
 function D:set_themes(axis: string, values: any)
@@ -1089,6 +1441,7 @@ function D:set_themes(axis: string, values: any)
 		doc.themes[axis] = U.deep_copy(values)
 	end
 	self.tokens_changed = true
+	self.var_ctx_ = nil
 end
 
 -- Warnings found once the draft is done: resolve problems on what changed,
@@ -1311,6 +1664,19 @@ function D:finish()
 	local drawn = r:roots(self.d.doc)
 	if next(self.changed) ~= nil then
 		self:lint(drawn)
+		-- (scrolling: only roots touched that use overflow/scroll are laid out)
+		Proto.lint_scroll({ changed = self.changed, layout = function(root)
+			Layout.run({ root })
+		end }, drawn, self.warnings)
+	end
+	if next(self.changed) ~= nil or self.proto_touched or next(self.deleted) ~= nil then
+		Proto.lint({ doc = self.d.doc, changed = self.changed, deleted = self.deleted, touched = self.proto_touched }, drawn, self.warnings)
+		-- (step 4) variant sets and Change to
+		Proto.lint_variants(self.d.doc, drawn, self.warnings, self.changed)
+	end
+	-- (step 5) variables: actions and bindings against the Tokens
+	if next(self.changed) ~= nil or self.proto_touched or self.tokens_changed then
+		Proto.lint_vars({ doc = self.d.doc, changed = self.changed, all = self.proto_touched == true or self.tokens_changed == true }, self.warnings)
 	end
 	for _, p in r.problems do
 		local top = string.match(p.node, "^([^/]+)") or p.node

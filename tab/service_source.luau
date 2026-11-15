@@ -19,6 +19,11 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 	local service = Guard.service(zeron.service())
 	local roots = Roots.new(`design.{did}.roots`)
 	local selection = ui.state(`design.{did}.selection`, {} :: { string })
+	-- Selected interactions (F6 C1, noodles): `{ key, list = { { id, k } } }`,
+	-- `key` the layer selection they were picked in (its ids joined by ","):
+	-- read as none once the selection changes (canvas.luau `ia_list`).
+	local ia_sel = ui.state(`design.{did}.ia_sel`, { key = "", list = {} } :: any)
+	ia_sel:set({ key = "", list = {} })
 	local flashes = ui.state(`design.{did}.flashes`, {} :: { any })
 	local status = ui.state(`design.{did}.status`, "loading")
 	local version = 0
@@ -42,6 +47,58 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		return at
 	end
 
+	-- The Design's flows (`{ { name, start } }`, proto-step1-spec §2): from
+	-- `scene` answers and `changed` events. (Small: a state.)
+	local flows = ui.state(`design.{did}.flows`, {} :: { any })
+	flows:set({})
+	local function take_flows(f: any)
+		local list = if type(f) == "table" then f else {}
+		local was = flows:peek()
+		local same = #was == #list
+		if same then
+			for i, x in list do
+				if was[i].name ~= x.name or was[i].start ~= x.start then
+					same = false
+				end
+			end
+		end
+		if not same then
+			flows:set(list)
+		end
+	end
+
+	-- The Design's prototype settings (F2a): `prototype` as stored (the
+	-- panel edits it) and `device` as Play plays it ({ w?, h?, fit, bg? }).
+	-- Every scene answer and `changed` carries them; missing is none.
+	local prototype = ui.state(`design.{did}.prototype`, nil :: any)
+	local device = ui.state(`design.{did}.device`, nil :: any)
+	prototype:set(nil)
+	device:set(nil)
+	local function take_proto(p: any, dv: any)
+		local function same(a: any, b: any): boolean
+			if type(a) ~= "table" or type(b) ~= "table" then
+				return a == b
+			end
+			for k, v in a do
+				if not same(v, b[k]) then
+					return false
+				end
+			end
+			for k in b do
+				if a[k] == nil then
+					return false
+				end
+			end
+			return true
+		end
+		if not same(prototype:peek(), p) then
+			prototype:set(p)
+		end
+		if not same(device:peek(), dv) then
+			device:set(dv)
+		end
+	end
+
 	-- Roots from a `scene` answer put in place: one written at its index
 	-- (so the Canvas draws that Screen alone), the list rebuilt only when
 	-- the order or the set of roots changes.
@@ -50,6 +107,11 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 			return
 		end
 		version = math.max(version, reply.version or 0)
+		-- (The Design's flows, beside the roots: missing or empty is none.)
+		if reply.flows ~= nil then
+			take_flows(reply.flows)
+		end
+		take_proto(reply.prototype, reply.device)
 		local list = roots:peek()
 		local at = index_of(list)
 		local order = reply.order
@@ -118,9 +180,29 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		end, function(err: any)
 			status:set(`error: {err}`)
 			say(`scene: {err}`)
+			-- (Not there any more: deleted, say so rather than "damaged".)
+			service:call("designs", {}):after(function(r: any)
+				if disposed or type(r) ~= "table" or type(r.designs) ~= "table" then
+					return
+				end
+				for _, d in r.designs do
+					if d.did == did then
+						return
+					end
+				end
+				status:set("deleted")
+			end, function() end)
 		end)
 	end
 	load()
+
+	-- Deleted (here, from the Designs page, or by an agent): every tab
+	-- showing it says so (init.luau). Plugins can't close a panel tab.
+	table.insert(offs, service:on("designs", function(e: any)
+		if type(e) == "table" and e.deleted == did then
+			status:set("deleted")
+		end
+	end))
 
 	-- (The last `changed`, for tests to read: `zgx inspect state`.)
 	local last_changed = ui.state(`design.{did}.last_changed`, nil :: any)
@@ -129,6 +211,9 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 			return
 		end
 		last_changed:set({ by = e.by, chat = e.chat, version = e.version, flash = e.flash, label = e.label })
+		-- (Every `changed` carries the Design's flows when it has any.)
+		take_flows(e.flows)
+		take_proto(e.prototype, e.device)
 		local ids = {}
 		for id in e.roots or {} do
 			table.insert(ids, id)
@@ -181,7 +266,44 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		end
 	end
 
-	local source = { roots = roots, selection = selection, flashes = flashes, dark = o.dark, status = status, save = save, chat_title = o.chat_title }
+	local source = { roots = roots, selection = selection, ia_sel = ia_sel, flashes = flashes, dark = o.dark, status = status, save = save, chat_title = o.chat_title, flows = flows, prototype = prototype, device = device }
+
+	-- (step 4) A Screen resolved with Play's variant state ({ [instance id] =
+	-- member id }): its root as `scene` gives it, or nil.
+	-- (V3) `run` = { vars, mode }: Play's variables, as the scene call takes them.
+	-- (step 6 P5) `size` = { w, h }: laid out at that window (Responsive).
+	function source.variant_root(id: string, vmap: { [string]: string }, done: (root: any?) -> (), run: any?, size: any?)
+		local args: any = { did = did, roots = { id }, variants = vmap, max_bytes = 50000000, size = size }
+		if run then
+			args.vars = run.vars
+			args.mode = run.mode
+		end
+		service:call("scene", args):after(function(reply: any)
+			local r = type(reply) == "table" and type(reply.roots) == "table" and reply.roots[1] or nil
+			done(if r and r.id == id then r else nil)
+		end, function(err: any)
+			say(`variant: {err}`)
+			done(nil)
+		end)
+	end
+
+	-- (step 6 P5) Screens `ids` laid out at a window of `size` ({ w, h }), as
+	-- Play's Responsive shows them: their roots as `scene` gives them, or nil.
+	function source.sized_roots(ids: { string }, size: any, done: (roots: { any }?) -> ())
+		service:call("scene", { did = did, roots = ids, size = size, max_bytes = 50000000 }):after(function(reply: any)
+			done(if type(reply) == "table" and type(reply.roots) == "table" then reply.roots else nil)
+		end, function(err: any)
+			say(`responsive: {err}`)
+			done(nil)
+		end)
+	end
+
+	-- A prototype's web link (Play): where Zeron opens links.
+	function source.open_url(url: string)
+		if type(zeron.open_url) == "function" then
+			zeron.open_url(url)
+		end
+	end
 
 	function source.edit(ops: { any }, label: string?, eo: any?)
 		local e = eo or {}
@@ -368,10 +490,18 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 	table.insert(Draw.redrawers, redraw_all)
 	table.insert(Draw.listeners, redraw_showing)
 
+	-- The theme the Design is viewed in: every axis picked so far is sent
+	-- (the service keeps the map it's given whole, so one axis alone reset
+	-- the others). Play reads it for the page's modes (V3).
+	local view_map: { [string]: string } = {}
 	function source.view_theme(axis: string, value: string)
-		service:call("view_theme", { did = did, theme = { [axis] = value } }):after(function() end, function(err: any)
+		view_map[axis] = value
+		service:call("view_theme", { did = did, theme = table.clone(view_map) }):after(function() end, function(err: any)
 			say(`view_theme: {err}`)
 		end)
+	end
+	function source.view_theme_map(): { [string]: string }
+		return table.clone(view_map)
 	end
 
 	-- Let go of the Design: no tab shows it any more (init.luau). Its

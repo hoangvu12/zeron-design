@@ -21,6 +21,8 @@ local Export = require("./engine/export")
 local Images = require("./engine/images")
 local Webfonts = require("./engine/webfonts")
 local Handoff = require("./engine/handoff")
+local Proto = require("./engine/proto")
+local Sim = require("./engine/sim")
 
 Boot.fonts(zeron)
 Designs.init(zeron)
@@ -66,7 +68,8 @@ local function tell_changed(d: any, c: any, by: string, label: string, chat: str
 	end
 	emit("changed", {
 		did = d.did, version = c.version, roots = c.roots, removed = c.removed, order = c.order,
-		by = by, chat = chat, label = label, flash = flash, ids = made,
+		by = by, chat = chat, label = label, flash = flash, ids = made, flows = d.doc.flows,
+		prototype = d.doc.prototype, device = Proto.played_prototype(d.doc.prototype),
 	})
 end
 
@@ -94,13 +97,36 @@ end
 
 function M.scene(args: any): any
 	local d = held(did_of(args))
+	-- (a Simulate frame being screenshot: composed already, engine/sim.luau)
+	local frame = type(args.node) == "string" and M.sim_frames and M.sim_frames[args.node]
+	if frame then
+		return { did = d.did, version = d.version, roots = { { id = frame.id, v = 0, nodes = frame.nodes, live = frame.live } } }
+	end
 	local want = nil
 	if type(args.roots) == "table" and #args.roots > 0 then
 		want = args.roots
 	end
 	local have = if type(args.have) == "table" then args.have else {}
 	local theme = if type(args.theme) == "table" then args.theme else d.view_theme
-	local r = Resolve.new(d.doc, theme)
+	-- (step 5) Play's variables: `vars` (overrides, engine/vars.luau) and
+	-- `mode` (run-time axis picks over the theme)
+	local r = Resolve.new(d.doc, theme, {
+		vars = if type(args.vars) == "table" then args.vars else nil,
+		mode = if type(args.mode) == "table" then args.mode else nil,
+	})
+	-- (step 4) Play's variant state: { [instance id] = member id }, one root
+	if type(args.variants) == "table" then
+		r.swap = args.variants
+	end
+	local vs_all = Proto.variant_sets(d.doc)
+	local vsets = vs_all.of
+	-- (V3) each member's props, for a Change to's `vp` (two-way binding)
+	local vprops = {}
+	for _, s in vs_all.sets do
+		for id, p in s.props do
+			vprops[id] = p
+		end
+	end
 	local ids = {}
 	local exists = {}
 	for _, n in d.doc.children do
@@ -134,18 +160,37 @@ function M.scene(args: any): any
 	if #fresh > 0 then
 		emit("fonts", { families = fresh })
 	end
-	Layout.run(resolved)
+	-- (step 6 P5) Play's Responsive: the Screens asked for, laid out at a
+	-- window's size (`size` = { w, h }; engine/layout.luau `responsive`)
+	local size = type(args.size) == "table" and args.size or nil
+	if size and type(size.w) == "number" and type(size.h) == "number" and size.w > 0 and size.h > 0 then
+		Layout.responsive(resolved, size.w, size.h)
+	else
+		Layout.run(resolved)
+	end
 	Icons.need(Icons.used(resolved))
 	local images = Images.links(d.did)
 	local function icon(name, weight)
 		return Icons.get(name, weight)
+	end
+	local screens = Proto.screens(d.doc)
+	-- A state to draw (a screenshot's): asked for, or the pending render's.
+	local state = if type(args.state) == "table" then args.state else nil
+	if not state and type(args.node) == "string" then
+		local p = M.render_state
+		if p and p.did == d.did and p.id == args.node then
+			state = p.state
+		end
 	end
 	for _, root in resolved do
 		if bytes >= max then
 			table.insert(more, root.id)
 			continue
 		end
-		local items = Scene.items(root, { images = images, icons = icon })
+		local items = Scene.items(root, { images = images, icons = icon, screens = screens, vsets = vsets, vprops = vprops })
+		if state and type(state.id) == "string" and (state.s == "hover" or state.s == "press") then
+			Scene.apply_state(items, state.id, state.s)
+		end
 		if type(args.node) == "string" and args.node ~= root.id then
 			-- One node and what's inside it (a screenshot's): its items are
 			-- a run of the root's, the node first and `n` after it.
@@ -160,7 +205,17 @@ function M.scene(args: any): any
 			end
 			items = cut or items
 		end
-		local entry = { id = root.id, v = d.rootv[root.id] or 0, nodes = items }
+		local entry: any = { id = root.id, v = d.rootv[root.id] or 0, nodes = items }
+		-- (step 5) the Tokens it reads, sorted: a set refreshes only roots
+		-- that use the variable
+		if root.__uses and next(root.__uses) ~= nil then
+			local uses = {}
+			for name in root.__uses do
+				table.insert(uses, name)
+			end
+			table.sort(uses)
+			entry.uses = uses
+		end
 		local size = #zeron.json.encode(entry)
 		if bytes > 0 and bytes + size > max then
 			table.insert(more, root.id)
@@ -169,7 +224,7 @@ function M.scene(args: any): any
 			table.insert(out, entry)
 		end
 	end
-	return { did = d.did, version = d.version, theme = theme, roots = out, removed = if #removed > 0 then removed else nil, order = order_of(d), more = if #more > 0 then more else nil }
+	return { did = d.did, version = d.version, theme = theme, roots = out, removed = if #removed > 0 then removed else nil, order = order_of(d), more = if #more > 0 then more else nil, flows = d.doc.flows, prototype = d.doc.prototype, device = Proto.played_prototype(d.doc.prototype) }
 end
 
 -- â”€â”€ calls from the window â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -180,7 +235,8 @@ local function summary(d: any): any
 		did = d.did, name = d.name, version = d.version, order = order_of(d), roots = roots_summary(d),
 		themes = d.doc.themes or {}, tokens = d.doc.tokens or {},
 		selection = (Designs.kv_get("sel:" .. d.did) or {}).ids or {},
-		can_undo = u, can_redo = r,
+		can_undo = u, can_redo = r, flows = d.doc.flows,
+		prototype = d.doc.prototype, device = Proto.played_prototype(d.doc.prototype),
 	}
 end
 
@@ -246,8 +302,10 @@ serve("rename", function(args)
 end)
 
 serve("delete", function(args)
-	Designs.delete(did_of(args))
-	emit("designs", {})
+	local did = did_of(args)
+	Designs.delete(did)
+	-- (`deleted`: tabs showing it say so, tab/service_source.luau.)
+	emit("designs", { deleted = did })
 	return {}
 end)
 
@@ -287,6 +345,9 @@ serve("tree", function(args)
 				end
 				-- `lay`: its flex layout, "horizontal" or "vertical" (an Instance's from its Component).
 				local lay = n.layout
+				if Proto.has(n) then
+					item.proto = true
+				end
 				table.insert(nodes, item)
 				if n.type == "instance" and not inside then
 					local x = r:node(n, r.theme, {})
@@ -341,7 +402,58 @@ serve("node", function(args)
 		walk(x)
 	end
 	local resolved = r and U.props(Edit.clean_resolved(r)) or nil
-	return { node = raw, box = box and { x = box.x, y = box.y, w = box.w, h = box.h }, resolved = resolved }
+	-- (step 4, F4b) the variant set around it, for the Prototype panel's
+	-- "Change to": the closest Instance of a set at or above the layer (or the
+	-- Component member it is in), and the set's members by their props
+	local variant = nil
+	local vs = Proto.variant_sets(d.doc)
+	if next(vs.of) ~= nil then
+		local chain = {}
+		local p: string? = id
+		while p do
+			table.insert(chain, p)
+			p = string.match(p, "^(.*)/[^/]+$")
+		end
+		local f = draft:find(chain[#chain])
+		while f and f.parent do
+			table.insert(chain, f.parent.id)
+			f = draft:find(f.parent.id)
+		end
+		for k, c in chain do
+			local member, inst = nil, nil
+			local n = nil
+			if string.find(c, "/", 1, true) then
+				n = draft:resolved_find(c)
+			else
+				local fc = draft:find(c)
+				n = fc and fc.node
+			end
+			if type(n) == "table" then
+				if n.__inst and vs.of[n.__inst] then
+					member, inst = n.__inst, c
+				elseif n.type == "instance" and type(n.ref) == "string" and vs.of[n.ref] then
+					member, inst = n.ref, c
+				elseif n.reusable == true and vs.of[c] then
+					member = c
+				end
+			end
+			if member then
+				local set = vs.of[member]
+				local list = {}
+				for _, m in vs.sets[set].members do
+					local parts = {}
+					for pk, pv in vs.sets[set].props[m] or {} do
+						table.insert(parts, `{pk}={tostring(pv)}`)
+					end
+					table.sort(parts)
+					table.insert(list, { id = m, label = table.concat(parts, ", "), props = vs.sets[set].props[m] })
+				end
+				variant = { set = set, member = member, instance = inst, own = k == 1, members = list }
+				break
+			end
+		end
+	end
+	return { node = raw, box = box and { x = box.x, y = box.y, w = box.w, h = box.h }, resolved = resolved, variant = variant }
 end, true)
 
 serve("edit", function(args)
@@ -601,6 +713,8 @@ local function render_one(event: any): (any?, number)
 			end
 			local ev = table.clone(event)
 			ev.req = req
+			-- (a handler that doesn't pass state on to scene still gets it)
+			M.render_state = if ev.state then { did = ev.did, id = ev.id, state = ev.state } else nil
 			emit("render", ev)
 			local wait = if window_silent then SILENT_WAIT else RENDER_WAIT
 			local waited = 0
@@ -616,6 +730,7 @@ local function render_one(event: any): (any?, number)
 		end
 	end)
 	render_busy = false
+	M.render_state = nil
 	if not ok then
 		return { error = tostring(err) }, tries
 	end
@@ -635,6 +750,40 @@ local function render_one(event: any): (any?, number)
 	return done, tries
 end
 
+-- The node whose states drive `id` in a state screenshot: `id` itself or
+-- the nearest node above it (as drawn) that has states.
+function M.driver_of(d: any, id: string): string
+	local draft = Edit.draft(d)
+	local ok, _, roots = pcall(draft.resolved_find, draft, id)
+	if not ok or not roots then
+		return id
+	end
+	local found = nil
+	local function walk(n, best)
+		if found then
+			return
+		end
+		local b = if type(n.states) == "table" then n.id else best
+		if n.id == id then
+			found = b or id
+			return
+		end
+		for _, c in (n.children or {}) do
+			walk(c, b)
+		end
+	end
+	for _, r in roots do
+		walk(r, nil)
+	end
+	return found or id
+end
+
+-- Simulate's frames waiting for the window to draw them: the window asks
+-- `scene { node = <frame id> }` as for any screenshot, and gets the frame.
+local sim_frames: { [string]: any } = {}
+local sim_n = 0
+M.sim_frames = sim_frames
+
 local function screenshots(d: any, shots: { any }): ({ any }, { string })
 	if #shots == 0 then
 		return {}, {}
@@ -642,7 +791,36 @@ local function screenshots(d: any, shots: { any }): ({ any }, { string })
 	local draft = Edit.draft(d)
 	local reqs = {}
 	local gone = {}
+	local sim_items = nil -- root id → scene items, for Simulate's frames
 	for _, shot in shots do
+		if shot.sim then
+			-- A Simulate view: one frame composed of the Screens and overlays
+			-- shown, as scene items the window draws as one root.
+			if not sim_items then
+				sim_items = {}
+				local ok_l, all = pcall(draft.laid_out, draft, nil)
+				local images = Images.links(d.did)
+				local screens = Proto.screens(d.doc)
+				for _, root in (if ok_l then all else {}) do
+					if screens[root.id] then
+						sim_items[root.id] = Scene.items(root, { images = images, icons = Agent.icons, screens = screens })
+					end
+				end
+			end
+			sim_n += 1
+			local fid = "sim" .. sim_n
+			local frame, box = Sim.compose(shot.sim, function(rid)
+				return sim_items[rid]
+			end, fid)
+			if frame and box then
+				sim_frames[fid] = frame
+				local scale = math.min(2, SHOT_MAX / math.max(box.w, box.h, 1))
+				table.insert(reqs, { id = fid, label = shot.sim.label, event = { did = d.did, root = fid, id = fid, scale = scale, x = box.x, y = box.y, w = math.max(box.w, 1), h = math.max(box.h, 1) } })
+			else
+				table.insert(gone, `no screenshot of Simulate's "{tostring(shot.sim.label)}": its Screen isn't in the Design any more`)
+			end
+			continue
+		end
 		local id = shot.id
 		local fine, roots = pcall(draft.laid_out, draft, id)
 		if not fine then
@@ -665,13 +843,14 @@ local function screenshots(d: any, shots: { any }): ({ any }, { string })
 		end
 		if box then
 			local scale = shot.scale or math.min(2, SHOT_MAX / math.max(box.w, box.h, 1))
-			table.insert(reqs, { id = id, event = { did = d.did, root = roots[1] and roots[1].id, id = id, scale = scale, x = box.x, y = box.y, w = math.max(box.w, 1), h = math.max(box.h, 1) } })
+			table.insert(reqs, { id = id, event = { did = d.did, root = roots[1] and roots[1].id, id = id, scale = scale, x = box.x, y = box.y, w = math.max(box.w, 1), h = math.max(box.h, 1), state = shot.state } })
 		end
 	end
 	-- (Laid out above, before any wait: what the call made, where it is now.)
 	local images, notes, shot_list = {}, gone, {}
 	for _, r in reqs do
 		local done, tries = render_one(r.event)
+		sim_frames[r.id] = nil
 		if done and type(done.png) == "string" then
 			table.insert(images, { type = "image", data = done.png, mimeType = "image/png" })
 			table.insert(shot_list, { id = r.id, png = done.png, scale = r.event.scale })
@@ -915,8 +1094,16 @@ zeron.tool({
 		local shots, exports = {}, {}
 		local can_write = type(zeron.write_file) == "function"
 		if draft then
-			for _, id in draft.screenshots do
-				table.insert(shots, { id = id })
+			for _, s in draft.screenshots do
+				if type(s) == "table" and s.sim then
+					-- a Simulate view (engine/sim.luau)
+					table.insert(shots, { sim = s.sim })
+				elseif type(s) == "table" then
+					-- a state: drawn on the node with states at or above it
+					table.insert(shots, { id = s.id, state = { id = M.driver_of(d, s.id), s = s.state } })
+				else
+					table.insert(shots, { id = s })
+				end
 			end
 			for _, e in draft.exported do
 				if can_write then

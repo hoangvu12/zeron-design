@@ -11,7 +11,8 @@ local ui = require("./pointer").ui
 --     a type icon and the name (Enter renames it and what points to it), a
 --     cell per value (a colour: swatch, opening the paint picker, hex and %;
 --     a number or text: a field), ⋯ (Rename, Duplicate, Delete);
---   - "+ Add variable ⌄": Colour, Number or Text.
+--   - "+ Add variable ⌄": Colour, Number, Text or Boolean (step 5, V5b: a
+--     boolean's cell is a checkbox and true/false, one a theme column).
 -- With no variables: "No variables yet" and a primary "+ Add variable".
 --
 -- Edits go out as `tokens` / `renameToken` / `themes` ops through
@@ -42,9 +43,11 @@ local KINDS = {
 	-- (a "hash" icon would be the board's; braces is the nearest there is)
 	{ type = "number", label = "Number", icon = "braces", base = "number/new", value = 0 },
 	{ type = "string", label = "Text", icon = "text", base = "text/new", value = "Text" },
+	-- (step 5, V5b) true/false: visibility, variant properties, conditions
+	{ type = "boolean", label = "Boolean", icon = "check", base = "boolean/new", value = false },
 }
 local function kind_icon(t: string): string
-	return if t == "color" then "drop" elseif t == "string" then "text" else "braces"
+	return if t == "color" then "drop" elseif t == "string" then "text" elseif t == "boolean" then "check" else "braces"
 end
 
 -- A token row's value for a column of the axis (the unthemed value where it
@@ -438,6 +441,71 @@ function M.Panel(props: PanelProps): Node
 		}
 	end
 
+	-- (step 5, V5b) A boolean's cell: a checkbox (14 r4, the accent when
+	-- true) and "true" / "false"; a click flips that column's value.
+	local function bool_cell(name: string, axis: string?, cols: { string }, col: string): Node
+		local function value(): boolean
+			local r = by_name:get()[name]
+			return (r and token_value(r, axis, col)) == true
+		end
+		return ui.div {
+			grow = 1,
+			basis = 0,
+			min_w = 0,
+			ui.button {
+				id = `var-{name}-{col}`,
+				label = `{name} {col}`,
+				w_full = true,
+				h = 28,
+				px = 8,
+				gap = 8,
+				rounded = 8,
+				border = 0,
+				items = "center",
+				bg = L.field,
+				hover = { bg = L.field_active },
+				focus = { outline = 0 },
+				on_click = function()
+					local r = by_name:peek()[name]
+					if r then
+						local now = token_value(r, axis, col) == true
+						edit({ { op = "tokens", tokens = { [name] = token_with(r, axis, cols, col, not now) } } }, "Change variable")
+					end
+				end,
+				ui.div {
+					w = 14,
+					h = 14,
+					shrink = 0,
+					rounded = 4,
+					items = "center",
+					justify = "center",
+					border = 1,
+					border_color = function(): string
+						return if value() then L.accent else (L.chk_br or L.border)
+					end,
+					bg = function(): string
+						return if value() then L.accent else CLEAR
+					end,
+					ui.div {
+						opacity = function(): number
+							return if value() then 1 else 0
+						end,
+						Kit.icon("check", 10, L.on_accent, 2.6),
+					},
+				},
+				ui.text {
+					function(): string
+						return if value() then "true" else "false"
+					end,
+					text_size = 12,
+					color = L.fg,
+					font = Look.UI,
+					grow = 1,
+				},
+			},
+		}
+	end
+
 	-- A variable's row.
 	local function var_row(name: string, kind: string, axis: string?, cols: { string }): Node
 		return ui.component(function(): Node
@@ -495,7 +563,7 @@ function M.Panel(props: PanelProps): Node
 				},
 			}
 			for _, c in cols do
-				table.insert(r, if kind == "color" then colour_cell(name, axis, cols, c) else value_cell(name, kind, axis, cols, c))
+				table.insert(r, if kind == "color" then colour_cell(name, axis, cols, c) elseif kind == "boolean" then bool_cell(name, axis, cols, c) else value_cell(name, kind, axis, cols, c))
 			end
 			table.insert(
 				r,
@@ -845,7 +913,7 @@ function M.Panel(props: PanelProps): Node
 				Kit.empty(L, {
 					icon = "braces",
 					title = "No variables yet",
-					body = "Variables hold colours, numbers and text that layers point to. Add one, or ask an agent to set up a palette.",
+					body = "Variables hold colours, numbers, text and true/false values that layers point to. Add one, or ask an agent to set up a palette.",
 					action = add_menu(true),
 				}),
 				ui.div { h = 12 },

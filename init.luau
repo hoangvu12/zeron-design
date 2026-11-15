@@ -111,9 +111,9 @@ local function source_of(did: string, name: string?): (any, any)
 			name = name,
 			chat_title = chat_title,
 			log = function(msg: string)
-				-- (A Design that didn't open shows States.Error, not a toast.)
+				-- (A Design that didn't open, or was deleted, shows a state, not a toast.)
 				local st = if s then s.status:peek() else nil
-				if type(st) == "string" and string.sub(st, 1, 5) == "error" then
+				if type(st) == "string" and (string.sub(st, 1, 5) == "error" or st == "deleted") then
 					return
 				end
 				editor_toast(msg)
@@ -146,6 +146,8 @@ require("./tab/dev").register(zeron, Shell, source_of, dark)
 
 -- (Below: a .zdesign from disk, opened in `panel`.)
 local open_file: (panel: any, done: (() -> ())?) -> ()
+-- (Below: the "All designs" tab, opened in `panel`.)
+local open_gallery: (panel: any?) -> ()
 
 zeron.tab(KIND, function(tab: any): Node
 	local did = tab.data and tab.data.did
@@ -168,6 +170,8 @@ zeron.tab(KIND, function(tab: any): Node
 			return "loading"
 		elseif type(s) == "string" and string.sub(s, 1, 5) == "error" then
 			return "error"
+		elseif s == "deleted" then
+			return "deleted"
 		end
 		return "ready"
 	end
@@ -186,6 +190,14 @@ zeron.tab(KIND, function(tab: any): Node
 			return ui.presence(phase, function(which: string): Node
 				if which == "loading" then
 					return States.Loading(L, `Opening {name}…`)
+				elseif which == "deleted" then
+					-- (Plugins can't close a panel tab: say how.)
+					return States.Deleted(L, {
+						name = name,
+						other = if panel then function()
+							open_gallery(panel)
+						end else nil,
+					})
 				elseif which == "error" then
 					local s = tostring(source.status:peek())
 					local why = string.gsub(string.gsub(s, "^error:?%s*", ""), "%s+$", "")
@@ -268,299 +280,580 @@ pcall(function()
 	end)
 end)
 
--- "Edited 2 min ago", "Edited 1 h ago", "Yesterday", "Nov 11": from the
--- `designs` reply's `updated` (os.time seconds).
-local function edited(t: any): string
-	if type(t) ~= "number" or t <= 0 then
-		return ""
+-- ---------------------------------------------------------------------------
+-- The panel home's Designs: a part of its own just above the session's side
+-- chats (before `#panel-home-lanes`, the column of ports, side chats and
+-- subagents), folded at first, drawn with the same pieces Zeron draws those with (ds/session_row: the
+-- section's title, folding; a row each, its time in the corner; "Show N
+-- more"), so it reads as one more of the home's lists. A click on a row opens
+-- that Design in the panel; + New makes one and opens it. Its title's
+-- secondary click: New design, Open design… (a .zdesign) and the dev imports.
+
+local SessionRow = require("@ds/session_row")
+local Button = require("@ds/button")
+local Icon = require("@ds/icon")
+local ContextMenu = require("@ds/context_menu")
+local IconButton = require("@ds/icon_button").IconButton
+local control = require("@ds/control")
+
+-- A lane's row (ds/panel_home LANE_H): the row's slot and the list's gap.
+local ROW_H = 32
+local ROW_GAP = ROW_H - SessionRow.SLOT
+-- How many show before "Show N more" (the side chats' own count).
+local FIRST = 5
+
+-- The Designs, one list for the window, every section reading it. Asked for
+-- when a section first builds; again when the service says the list changed
+-- (`designs`: new, renamed, deleted, imported), when an agent's snippet ends,
+-- and a while after edits (their `updated`), only while a section shows.
+-- Asks never overlap: one asked meanwhile runs once after.
+local designs = ui.state("design-pure.designs", nil :: { any }?)
+local asking, ask_again = false, false
+local showing = 0
+local stale = true
+local function refresh()
+	if showing <= 0 then
+		stale = true
+		return
 	end
-	local d = math.max(0, os.time() - t)
-	if d < 60 then
-		return "Edited just now"
-	elseif d < 3600 then
-		return `Edited {math.floor(d / 60)} min ago`
-	elseif d < 86400 then
-		return `Edited {math.floor(d / 3600)} h ago`
-	elseif d < 2 * 86400 then
-		return "Yesterday"
+	if asking then
+		ask_again = true
+		return
 	end
-	local ok, s = pcall(function(): string
-		return `{os.date("%b", t)} {tonumber(os.date("%d", t))}`
-	end)
-	return if ok then s else `{math.floor(d / 86400)} days ago`
-end
-
--- The picker's rows, in the redesign's metrics (Board · Home and states):
--- 32 high (40 a Recent row), r7, the content 36 in so it lines up under the
--- Design row's label; hover in the field grey.
-local function pick_row(L: any, o: { id: string, icon: string, label: string, accent: boolean?, meta: string?, on_click: () -> () }): Node
-	return ui.button {
-		id = o.id,
-		label = o.label,
-		w_full = true,
-		h = 32,
-		pl = 36,
-		pr = 10,
-		gap = 10,
-		rounded = 7,
-		border = 0,
-		items = "center",
-		bg = "#00000000",
-		hover = { bg = L.field },
-		focus = { outline = 0 },
-		on_click = o.on_click,
-		ui.div { shrink = 0, color = if o.accent then L.accent else L.muted, Kit.icon(o.icon, 15) },
-		ui.text { o.label, text_size = 13, weight = if o.accent then 500 else 400, color = if o.accent then L.accent_fg else L.fg, grow = 1, min_w = 0, truncate = true },
-		if o.meta then ui.text { o.meta, text_size = 12, color = L.faint, shrink = 0 } else ui.div {},
-	}
-end
-
-local function thumb(L: any): Node
-	return ui.row {
-		w = 40,
-		h = 28,
-		shrink = 0,
-		p = 5,
-		gap = 3,
-		rounded = 5,
-		bg = L.field,
-		ui.div { grow = 1, basis = 0, h_full = true, rounded = 2, bg = L.faint, opacity = 0.35 },
-		ui.div { grow = 1, basis = 0, h_full = true, rounded = 2, bg = L.faint, opacity = 0.35 },
-	}
-end
-
-local function recent_row(L: any, r: any, i: number, on_click: () -> ()): Node
-	return ui.button {
-		id = `dp-recent-{i}`,
-		label = r.name or "Design",
-		w_full = true,
-		h = 40,
-		pl = 36,
-		pr = 10,
-		gap = 10,
-		rounded = 7,
-		border = 0,
-		items = "center",
-		bg = "#00000000",
-		hover = { bg = L.field },
-		focus = { outline = 0 },
-		on_click = on_click,
-		thumb(L),
-		ui.column {
-			grow = 1,
-			min_w = 0,
-			gap = 2,
-			ui.text { r.name or "Design", text_size = 13, color = L.fg, truncate = true, w_full = true },
-			ui.text { edited(r.updated), text_size = 12, color = L.faint, truncate = true, w_full = true },
-		},
-		ui.show(function(): boolean
-			return working:get()[r.did] ~= nil
-		end, ui.row {
-			shrink = 0,
-			gap = 4,
-			items = "center",
-			ui.div { w = 6, h = 6, rounded = 3, bg = L.agent },
-			ui.text {
-				function(): string
-					return working:get()[r.did] or ""
-				end,
-				text_size = 12,
-				weight = 500,
-				color = L.agent_fg,
-			},
-		}),
-	}
-end
-
-local function skeleton(L: any, w: number): Node
-	return ui.row {
-		w_full = true,
-		h = 40,
-		pl = 36,
-		pr = 10,
-		gap = 10,
-		items = "center",
-		opacity = ui.loop { from = 0.55, to = 1, duration = 900 },
-		ui.div { w = 40, h = 28, shrink = 0, rounded = 5, bg = L.field },
-		ui.column {
-			grow = 1,
-			gap = 6,
-			ui.div { w = w, h = 8, rounded = 4, bg = L.field_active },
-			ui.div { w = 60, h = 6, rounded = 3, bg = L.field },
-		},
-	}
-end
-
--- The picker: what the Design row opens under itself.
-local function Picker(props: { done: () -> (), panel: any? }): Node
-	local function open_here(did: string, name: string?)
-		open(did, name, props.panel)
+	asking, stale = true, false
+	local function settle()
+		asking = false
+		if ask_again then
+			ask_again = false
+			refresh()
+		end
 	end
-	local recent = ui.use_state(nil :: { any }?)
 	service:call("designs", {}):after(function(r: any)
-		recent:set(if type(r) == "table" and type(r.designs) == "table" then r.designs else {})
+		designs:set(if type(r) == "table" and type(r.designs) == "table" then r.designs else {})
+		settle()
 	end, function()
-		recent:set({})
+		if designs:peek() == nil then
+			designs:set({})
+		end
+		settle()
 	end)
-	local function new()
-		service:call("new", {}):after(function(made: any)
-			if type(made) == "table" and made.did then
-				open_here(made.did, made.name)
-			end
-			props.done()
-		end, function(why: any)
-			zeron.toast(`Design: {why}`)
+end
+local EDITS_MS = 4000
+local edits_due = false
+pcall(function()
+	service:on("designs", function()
+		refresh()
+	end)
+	service:on("working", function(e: any)
+		if type(e) == "table" and not e.on then
+			refresh()
+		end
+	end)
+	service:on("changed", function()
+		if edits_due then
+			return
+		end
+		edits_due = true
+		ui.after(EDITS_MS, function()
+			edits_due = false
+			refresh()
 		end)
-	end
-	-- Dev only: a Design with a picture stored in zeron.db, made as an
-	-- import would (a paint naming a path, then its bytes by `image_put`).
-	local has_picture, pictures = pcall(require, "./dev/test_picture")
-	local function picture_design()
-		service:call("new", { name = "Picture (dev)" }):after(function(made: any)
-			local did = made.did
-			local node = { type = "frame", name = "Card", width = 320, height = 240, fill = "#FFFFFF", cornerRadius = 16, layout = "vertical", padding = 16, gap = 12, children = {
-				{ type = "rectangle", name = "Photo", width = "fill_container", height = 144, cornerRadius = 12, fill = { type = "image", url = "images/demo.png", mode = "cover" } },
-				{ type = "text", name = "Caption", content = "A picture from zeron.db", fontSize = 16, fill = "#18181B" },
-			} }
-			service:call("edit", { did = did, ops = { { op = "insert", node = node, at = { x = 0, y = 0 } } }, label = "Picture card" }):after(function()
-				service:call("image_put", { did = did, url = "images/demo.png", base64 = (pictures :: any)["p1-demo"] }):after(function(r: any)
-					zeron.toast(`Design: stored {r and r.key}`)
-					open_here(did, made.name)
-					props.done()
+	end)
+end)
+
+-- Make a Design and open it in `panel`.
+local function new_design(panel: any?)
+	service:call("new", {}):after(function(made: any)
+		if type(made) == "table" and made.did then
+			open(made.did, made.name, panel)
+		end
+	end, function(why: any)
+		zeron.toast(`Design: {why}`)
+	end)
+end
+
+-- The dev-only imports (files under dev/ that aren't shipped): each makes a
+-- Design and opens it.
+local function dev_entries(panel: any?): { any }
+	local out = {}
+	local function import(label: string, text: string, name: string)
+		table.insert(out, {
+			label = label,
+			icon = "plus",
+			on_select = function()
+				service:call("import", { text = text, name = name }):after(function(made: any)
+					if type(made) == "table" and made.did then
+						open(made.did, made.name, panel)
+					end
 				end, function(why: any)
-					zeron.toast(`Design: image_put {why}`)
+					zeron.toast(`Design: {why}`)
 				end)
-			end, function(why: any)
-				zeron.toast(`Design: {why}`)
-			end)
-		end, function(why: any)
-			zeron.toast(`Design: {why}`)
-		end)
+			end,
+		})
 	end
 	local has_pulse, pulse_text = pcall(require, "./dev/pulse_zdesign")
-	local function import_pulse()
-		service:call("import", { text = pulse_text, name = "Pulse Dashboard (dev)" }):after(function(made: any)
-			if type(made) == "table" and made.did then
-				open_here(made.did, made.name)
-			end
-			props.done()
-		end, function(why: any)
-			zeron.toast(`Design: {why}`)
-		end)
+	if has_pulse then
+		import("Import Pulse (dev)", pulse_text :: any, "Pulse Dashboard (dev)")
 	end
-	-- Dev only: another bundled Design (dev/extra_zdesign.luau, not shipped).
 	local has_extra, extra = pcall(require, "./dev/extra_zdesign")
-	-- Dev only: the pen.dev parity Design (dev/parity_zdesign.luau, not shipped).
+	if has_extra then
+		import(`Import {(extra :: any).name}`, (extra :: any).text, (extra :: any).name)
+	end
 	local has_parity, parity = pcall(require, "./dev/parity_zdesign")
-	local function import_parity()
-		service:call("import", { text = parity.text, name = parity.name }):after(function(made: any)
-			if type(made) == "table" and made.did then
-				open_here(made.did, made.name)
-			end
-			props.done()
-		end, function(why: any)
-			zeron.toast(`Design: {why}`)
-		end)
+	if has_parity then
+		import(`Import {(parity :: any).name}`, (parity :: any).text, (parity :: any).name)
 	end
-	local function import_extra()
-		service:call("import", { text = extra.text, name = extra.name }):after(function(made: any)
-			if type(made) == "table" and made.did then
-				open_here(made.did, made.name)
-			end
-			props.done()
-		end, function(why: any)
-			zeron.toast(`Design: {why}`)
-		end)
-	end
-	-- The Recent list: skeleton rows while it loads, a line when it's empty.
-	local function recents(L: any): Node
-		return ui.presence(function(): string
-			local r = recent:get()
-			return if r == nil then "loading" elseif #r == 0 then "empty" else "list"
-		end, function(which: string): Node
-			if which == "loading" then
-				return ui.column { w_full = true, gap = 2, skeleton(L, 150), skeleton(L, 110), skeleton(L, 170) }
-			elseif which == "empty" then
-				return ui.div {
-					w_full = true,
-					pt = 4,
-					pr = 10,
-					pb = 10,
-					pl = 36,
-					ui.text { "Designs you or your agents open show up here.", text_size = 12, color = L.faint, wrap = true, w_full = true },
-				}
-			end
-			return ui.each(ui.computed(function(): { any }
-				local r = recent:get() or {}
-				local top = {}
-				for i = 1, math.min(#r, 8) do
-					top[i] = r[i]
-				end
-				return top
-			end), function(r: any, i: number): Node
-				return recent_row(L, r, i, function()
-					open_here(r.did, r.name)
-					props.done()
+	return out
+end
+
+-- A design as a session row reads it: its name, when it was last touched,
+-- and "working" while an agent's snippet runs in it.
+local function as_row(d: any, at_work: { [string]: string }): any
+	local t = math.max(tonumber(d.updated) or 0, tonumber(d.opened) or 0)
+	return {
+		id = d.did,
+		title = if type(d.name) == "string" and d.name ~= "" then d.name else "Design",
+		status = if at_work[d.did] then "working" else nil,
+		time = if t > 0 then t else nil,
+	}
+end
+
+-- A Design's menu (a secondary click on its row or card, or its ⋯ under
+-- the pointer): open it, rename it in place (`renaming` names the one being
+-- renamed), delete it. Deleting can't be undone (the service drops it and
+-- its history), so the menu asks once more. `d` is `{ id, title }`.
+local function design_menu(d: any, panel: any?, renaming: any): { any }
+	return {
+		{ label = "Open", icon = "palette", on_select = function()
+			open(d.id, d.title, panel)
+		end },
+		{ label = "Rename", icon = "pen", on_select = function()
+			renaming:set(d.id)
+		end },
+		{ separator = true },
+		{
+			label = "Delete",
+			icon = "trash-bin-minimalistic",
+			danger = true,
+			confirm = "Delete? Can't be undone",
+			on_select = function()
+				service:call("delete", { did = d.id }):after(function()
+					zeron.toast(`Design: deleted {d.title}`)
+				end, function(why: any)
+					zeron.toast(`Design: {why}`)
 				end)
-			end, {
-				key = function(r: any): string
-					return r.did
-				end,
-				w_full = true,
-				gap = 2,
-			})
-		end, { w_full = true })
+			end,
+		},
+	}
+end
+
+local function rename_design(did: string, name: string)
+	service:call("rename", { did = did, name = string.sub(name, 1, 200) }):after(function() end, function(why: any)
+		zeron.toast(`Design: {why}`)
+	end)
+end
+
+-- A Design's name, renamed in place: a field over its title, its text
+-- selected; ↩ or leaving it keeps a changed name, Esc keeps the old (as the
+-- sidebar renames a session in its row). `lead`: the palette glyph before
+-- it (a row's), else none (a card's).
+local function RenameField(d: any, renaming: any, lead: boolean): Node
+	local draft = ui.use_state(d.title)
+	local done_once = false
+	local function done(keep: boolean)
+		if done_once then
+			return
+		end
+		done_once = true
+		renaming:set(nil)
+		local v = string.match(draft:peek(), "^%s*(.-)%s*$") or ""
+		if keep and v ~= "" and v ~= d.title then
+			rename_design(d.id, v)
+		end
 	end
-	return ui.column {
-		id = "dp-picker",
+	return ui.row {
+		class = "dp-design-rename",
 		w_full = true,
-		-- (Built again as Zeron's appearance flips.)
-		ui.presence(function(): string
-			return if dark:get() then "dark" else "light"
-		end, function(theme: string): Node
-			local L = Look.of(theme == "dark")
-			return ui.column {
-				w_full = true,
-				gap = 2,
-				pick_row(L, { id = "dp-new", icon = "plus", label = "New design", accent = true, on_click = new }),
-				pick_row(L, {
-					id = "dp-open-file",
-					icon = "folder",
-					label = "Open design…",
-					meta = ".zdesign",
-					on_click = function()
-						open_file(props.panel, props.done)
-					end,
-				}),
-				-- Dev only: present when dev/pulse_zdesign.luau is (it isn't shipped).
-				ui.column {
+		h = SessionRow.SLOT,
+		pl = if lead then (SessionRow.SLOT - 14) / 2 else "$space.2",
+		pr = "$space.2",
+		gap = (SessionRow.SLOT - 14) / 2,
+		items = "center",
+		rounded = "$radius.md",
+		bg = "$hover",
+		if lead then ui.div { shrink = 0, color = "$text.secondary", Icon { name = "palette", size = 14 } } else nil,
+		ui.input {
+			id = "dp-design-rename-field",
+			value = draft,
+			label = "Design name",
+			placeholder = "Design name",
+			grow = 1,
+			min_w = 0,
+			h = 20,
+			px = 0,
+			border = 0,
+			bg = "#00000000",
+			focus = { border = 0, outline = 0 },
+			text_size = "$font.size.md",
+			weight = "$font.weight.medium",
+			color = "$text.primary",
+			select_on_focus = true,
+			on_key = function(e: any): boolean
+				if e.key == "Enter" then
+					done(true)
+					return true
+				elseif e.key == "Escape" then
+					done(false)
+					return true
+				end
+				return false
+			end,
+			on_blur = function()
+				done(true)
+			end,
+			on_mount = function(el: any)
+				local tries = 0
+				local function take()
+					if done_once or el:focus() then
+						return
+					end
+					tries += 1
+					if tries < 10 then
+						ui.after(16, take)
+					end
+				end
+				take()
+			end,
+		},
+	}
+end
+
+-- Every Design as a gallery (gallery.luau): the sidebar's "Designs" page,
+-- and the same as a tab in a chat's panel ("All designs" in the panel
+-- home's list: a plugin can't open its page, zeron.open goes only to a
+-- chat, home or Settings). Each shows while built: the list kept fresh
+-- meanwhile, as the panel's.
+local GALLERY = "design-gallery"
+local Gallery = require("./gallery")({
+	zeron = zeron,
+	service = service,
+	designs = designs,
+	working = working,
+	prefs = ui_prefs,
+	open = open,
+	open_file = open_file,
+	new_design = new_design,
+	design_menu = design_menu,
+	RenameField = RenameField,
+	watch = function(): () -> ()
+		showing += 1
+		if stale or designs:peek() == nil then
+			refresh()
+		end
+		return function()
+			showing -= 1
+		end
+	end,
+})
+open_gallery = function(panel: any?)
+	local p = panel or zeron.context("panel")
+	if not p then
+		zeron.toast("Design: open a chat to see all designs in its panel")
+		return
+	end
+	p.open_tab { kind = GALLERY, title = "All designs", icon = "gallery", data = { key = "all-designs" } }
+end
+zeron.tab(GALLERY, function(_tab: any): Node
+	return Gallery { panel = zeron.context("panel"), compact = true }
+end)
+zeron.page {
+	id = "designs",
+	title = "Designs",
+	icon = "palette",
+	build = function(_page: any): Node
+		-- (Its panel: the page's own, where a Design opens as a tab.)
+		return Gallery { panel = zeron.context("panel") }
+	end,
+}
+
+local function Designs(props: { panel: any }): Node
+	local panel = props.panel
+	showing += 1
+	ui.on_cleanup(function()
+		showing -= 1
+	end)
+	if stale or designs:peek() == nil then
+		refresh()
+	end
+	-- Folded or not (folded at first), and shown whole or not: kept in
+	-- zeron.store("ui"), as the editor's layout is.
+	local open_now = ui.use_state(ui_prefs.get("designs_open") == true)
+	local whole = ui.use_state(ui_prefs.get("designs_whole") == true)
+	local function toggle()
+		local v = not open_now:peek()
+		open_now:set(v)
+		ui_prefs.set("designs_open", v)
+	end
+	local function set_whole(v: boolean)
+		whole:set(v)
+		ui_prefs.set("designs_whole", v)
+	end
+	local all = ui.computed(function(): { any }
+		return designs:get() or {}
+	end)
+	-- The rows shown: the first few, those at work past them, or all.
+	local shown = ui.computed(function(): { rows: { any }, hidden: number }
+		local list, at_work = all:get(), working:get()
+		local out, n = {}, 0
+		local every = whole:get() or #list <= FIRST
+		for i, d in list do
+			if every or i <= FIRST or at_work[d.did] then
+				table.insert(out, as_row(d, at_work))
+			else
+				n += 1
+			end
+		end
+		return { rows = out, hidden = n }
+	end)
+	local rows = ui.computed(function(): { any }
+		return shown:get().rows
+	end)
+	local hidden = ui.computed(function(): number
+		return shown:get().hidden
+	end)
+	local function paged(): boolean
+		return hidden:get() > 0 or (whole:get() and #all:get() > FIRST)
+	end
+	local new_button = Button {
+		id = "dp-designs-new",
+		tone = "ghost",
+		size = "xs",
+		label = "New design",
+		tooltip = "New design (D)",
+		on_click = function()
+			new_design(panel)
+		end,
+		Icon { name = "plus", size = 14 },
+		ui.text { "New" },
+	}
+	-- The Design renamed in its row, while it is (one at a time).
+	local renaming = ui.use_state(nil :: string?)
+	local function row_menu(d: any): { any }
+		return design_menu(d, panel, renaming)
+	end
+	local function rename_field(d: any): Node
+		return RenameField(d, renaming, true)
+	end
+	local function row(_first: any, _index: any, now: any): Node
+		local function cur(): any
+			return now:get()
+		end
+		-- Its menu, opened by a secondary click or by its ⋯ (where the ⋯ is).
+		local open_at: ((x: number, y: number) -> boolean)? = nil
+		local dots_ref = ui.ref()
+		local dots = IconButton {
+			ref = dots_ref,
+			icon = "more-horizontal",
+			label = "Design actions",
+			tooltip = "More",
+			size = "sm",
+			tone = "quiet",
+			on_click = function()
+				local el, at = dots_ref:peek(), open_at
+				if not (el and at) then
+					return
+				end
+				local menu_w = (ui.theme.get("zeron.menu.width") :: number?) or 232
+				at((el.x or 0) + (el.width or 0) - menu_w, (el.y or 0) + (el.height or 0) + 4)
+			end,
+		}
+		local plain = SessionRow.Row {
+			class = "dp-design-row",
+			-- (Its title in the primary ink at rest, as side chats read.)
+			primary = true,
+			compact = function(): boolean
+				return true
+			end,
+			cur = cur,
+			name = function(): string
+				return `Open design {cur().title}`
+			end,
+			lead = ui.div { color = "$text.secondary", Icon { name = "palette", size = 14 } },
+			harness = function(): boolean
+				return true
+			end,
+			gap = ROW_GAP,
+			action = dots,
+			on_click = function()
+				local d = now:peek()
+				open(d.id, d.title, panel)
+			end,
+		}
+		return ui.div {
+			w_full = true,
+			h = ROW_H,
+			ui.presence(function(): string
+				return if renaming:get() == cur().id then "rename" else "row"
+			end, function(which: string): Node
+				if which == "rename" then
+					return rename_field(now:peek())
+				end
+				return ContextMenu {
+					label = "Design actions",
+					ring = "$radius.md",
 					w_full = true,
-					gap = "$zeron.list.gap",
-					pl = "$space.4",
-					if has_pulse then PanelHome.Row { id = "dp-import-pulse", icon = "plus", label = "Import Pulse (dev)", on_click = import_pulse } else ui.div {},
-					if has_extra then PanelHome.Row { id = "dp-import-extra", icon = "plus", label = `Import {extra.name}`, on_click = import_extra } else ui.div {},
-					if has_parity then PanelHome.Row { id = "dp-import-parity", icon = "plus", label = `Import {parity.name}`, on_click = import_parity } else ui.div {},
-					if has_picture then PanelHome.Row { id = "dp-picture", icon = "plus", label = "Picture Design (dev)", on_click = picture_design } else ui.div {},
+					hook = function(at: (x: number, y: number) -> boolean)
+						open_at = at
+					end,
+					items = function(): { any }?
+						return row_menu(now:peek())
+					end,
+					plain,
+				}
+			end),
+		}
+	end
+	local part = ui.column {
+		id = "dp-designs",
+		class = "panel-home-fold",
+		w_full = true,
+		gap = "$zeron.list.gap",
+		-- Its title, as ds/session_row's Section draws one (24 high, quiet
+		-- small words, brighter under the pointer, a click folds it; no
+		-- arrow, as side chats' and subagents' have none), + New at its end.
+		ui.row {
+			id = "dp-designs-head",
+			w_full = true,
+			h = SessionRow.TITLE,
+			pl = "$space.2",
+			pr = "$space.1",
+			gap = "$space.1",
+			items = "center",
+			color = "$text.tertiary",
+			cursor = "pointer",
+			hover = { color = "$text.secondary" },
+			role = "button",
+			label = "Designs",
+			expanded = function(): boolean
+				return open_now:get()
+			end,
+			focusable = true,
+			focus = control.ring,
+			rounded = PanelHome.inner(4),
+			on_click = toggle,
+			on_key = function(e: any): boolean?
+				if (e.key == "Enter" or e.key == " ") and not (e.cmd or e.ctrl or e.alt) then
+					toggle()
+					return true
+				end
+				return nil
+			end,
+			ui.text { "Designs", grow = 1, min_w = 0, truncate = true, text_size = "$font.size.xs", weight = "$font.weight.medium" },
+			new_button,
+		},
+		SessionRow.Fold {
+			open = function(): boolean
+				return open_now:get()
+			end,
+			h = function(): number
+				return #rows:get() * ROW_H + (if paged() then ROW_H else 0) + ROW_H
+			end,
+			body = ui.column {
+				w_full = true,
+				gap = 0,
+				ui.list {
+					id = "dp-designs-list",
+					data = rows,
+					key = function(r: any): string
+						return r.id
+					end,
+					row = row,
+					height = ROW_H,
+					w_full = true,
+					-- (The home scrolls, never this list: only the rows in view are built.)
+					virtualize = "ancestor",
 				},
-				ui.div { w_full = true, pt = 10, pr = 10, pb = 4, pl = 36, ui.text { "Recent", text_size = 12, weight = 600, color = L.faint } },
-				recents(L),
+				ui.show(paged, ui.div {
+					w_full = true,
+					h = ROW_H,
+					SessionRow.Pager {
+						id = "dp-designs-pager",
+						whole = function(): boolean
+							return whole:get()
+						end,
+						more = function(): number
+							return hidden:get()
+						end,
+						on_click = function()
+							set_whole(not whole:peek())
+						end,
+					},
+				}),
+				-- All of them, as a gallery: in the panel, as a tab (a plugin
+				-- can't open its sidebar page: zeron.open goes to a chat, home
+				-- or Settings only).
+				ui.div {
+					w_full = true,
+					h = ROW_H,
+					SessionRow.Row {
+						class = "dp-designs-all",
+						compact = function(): boolean
+							return true
+						end,
+						cur = function(): any
+							return { id = "dp-all", title = "All designs" }
+						end,
+						name = function(): string
+							return "All designs"
+						end,
+						lead = ui.div { color = "$text.tertiary", Icon { name = "gallery", size = 14 } },
+						harness = function(): boolean
+							return true
+						end,
+						gap = ROW_GAP,
+						on_click = function()
+							open_gallery(panel)
+						end,
+					},
+				},
+			},
+		},
+	}
+	return ContextMenu {
+		label = "Designs",
+		w_full = true,
+		items = function(): { any }?
+			local entries: { any } = {
+				{ label = "New design", icon = "plus", shortcut = "D", on_select = function()
+					new_design(panel)
+				end },
+				{ label = "Open design…", icon = "folder", on_select = function()
+					open_file(panel)
+				end },
 			}
-		end, { w_full = true }),
+			local dev = dev_entries(panel)
+			if #dev > 0 then
+				table.insert(entries, { separator = true })
+				for _, e in dev do
+					table.insert(entries, e)
+				end
+			end
+			return entries
+		end,
+		part,
 	}
 end
 
 zeron.place {
-	at = "hook:panel.empty",
-	after = function(): Node
+	at = "#panel-home-lanes",
+	before = function(): Node
 		local session = zeron.context("session")
 		local panel = zeron.context("panel")
 		if not session or not panel then
 			return ui.div {}
 		end
-		local shown = ui.use_state(false)
-		local function toggle()
-			shown:set(not shown:peek())
-		end
+		-- D on the home makes a Design, as S makes a side chat (the home
+		-- passes plugins the letters it doesn't take).
 		local key = zeron.live("panel_key")
 		local now = key()
 		local seen = if type(now) == "table" then now.n else nil
@@ -571,27 +864,11 @@ zeron.place {
 			end
 			seen = k.n
 			if string.upper(tostring(k.key or "")) == "D" then
-				ui.after(0, toggle)
+				ui.after(0, function()
+					new_design(panel)
+				end)
 			end
 		end)
-		return ui.column {
-			id = "dp-empty-rows",
-			w_full = true,
-			gap = "$zeron.list.gap",
-			PanelHome.Choice { id = "dp-open-design", icon = "palette" :: any, label = "Design" :: any, key = "D", on_click = toggle },
-			ui.presence(function(): string
-				return if shown:get() then "open" else "shut"
-			end, function(which: string): Node
-				if which == "shut" then
-					return ui.div {}
-				end
-				return Picker {
-					panel = panel,
-					done = function()
-						shown:set(false)
-					end,
-				}
-			end, { w_full = true }),
-		}
+		return Designs { panel = panel }
 	end,
 }

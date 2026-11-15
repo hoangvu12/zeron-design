@@ -5,6 +5,7 @@
 local U = require("./util")
 local Resolve = require("./resolve")
 local Edit = require("./edit")
+local Expr = require("./expr")
 
 local M = {}
 
@@ -119,7 +120,14 @@ function RUN.update(draft, op)
 	for k, v in (op.props or {}) do
 		props[k] = v
 	end
+	-- (B1) `turn`: a new rotation turns the layer about its centre (the
+	-- Properties panel; the Canvas's handle sends its own move)
+	local f = op.turn == true and props.rotation ~= nil and draft:find(op.id)
+	local old = if f then U.num(f.node.rotation, 0) else nil
 	draft:update(op.id, props)
+	if old ~= nil then
+		draft:turn_about_centre({ { id = op.id, old = old } })
+	end
 end
 
 function RUN.insert(draft, op, made)
@@ -229,6 +237,17 @@ end
 
 function RUN.tokens(draft, op)
 	draft:set_tokens(op.tokens or {}, op.replace == true)
+end
+
+-- The Design's prototype flows: { {name, start} } ("__null" or {} clears).
+function RUN.flows(draft, op)
+	draft:set_flows(op.flows)
+end
+
+-- The Design's prototype settings: { device, rotate, fit, background }
+-- ("__null" or {} clears; `merge = true` changes only the keys given).
+function RUN.prototype(draft, op)
+	draft:set_prototype(op.prototype, op.merge == true)
 end
 
 function RUN.themes(draft, op)
@@ -391,6 +410,8 @@ function RUN.detach(draft, op, made)
 	end
 	copy.__inst = nil
 	copy.__broken = nil
+	copy.__vb = nil
+	copy.__ref0 = nil
 	local sub = {}
 	renew(draft, copy, sub)
 	f.list[f.index] = copy
@@ -509,6 +530,8 @@ function M.clip(draft: any, ids: { string }): any
 				local c, ok = r:expand(U.deep_copy(n), {})
 				if ok then
 					c.__inst = nil
+					c.__vb = nil
+					c.__ref0 = nil
 					n = c
 				end
 			end
@@ -552,6 +575,8 @@ function RUN.paste(draft, op, made)
 	end
 	local same = clip.source == draft.d.did
 	local nodes = U.deep_copy(if same then clip.nodes else clip.detached)
+	-- links to Screens this Design lacks come along, as broken links (lint)
+	draft.lenient_links = not same
 	if not same then
 		-- Tokens it uses that this Design lacks come along
 		local now = draft.d.doc.tokens or {}
@@ -613,6 +638,15 @@ function RUN.renameToken(draft, op)
 	local old, new = "$" .. from, "$" .. to
 	local function rewrite(v)
 		if type(v) == "table" then
+			-- (step 5) an action's variable and its expressions
+			if (v.action == "set" or v.action == "toggle") and v.var == from then
+				v.var = to
+			end
+			if v.action == "set" and Expr.inner(v.to) then
+				v.to = Expr.rename(v.to, from, to)
+			elseif v.action == "if" and type(v.cond) == "string" then
+				v.cond = Expr.rename(v.cond, from, to)
+			end
 			for k, x in v do
 				if x == old then
 					v[k] = new

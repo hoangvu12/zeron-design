@@ -454,6 +454,10 @@ function M.Layers(props: { L: any, source: any, hover: any, id: string?, find: a
 					ui.text { agent, text_size = 12, weight = 500, color = L.agent_fg, font = Look.UI, truncate = true, max_w = 96 },
 				}
 				else ui.div {},
+			-- prototyping: it has states or links (tree's `proto`)
+			if n.proto
+				then ui.div { id = `layer-proto-{n.id}`, label = "Interactive", tooltip = "Has interactions or states", shrink = 0, w = 16, items = "center", justify = "center", color = L.accent_fg, Kit.icon("click", 12) }
+				else ui.div {},
 			-- the lock, then the eye
 			ui.row {
 				gap = 0,
@@ -556,7 +560,7 @@ function M.Layers(props: { L: any, source: any, hover: any, id: string?, find: a
 			data = rows,
 			height = ROW_H + ROW_GAP,
 			key = function(r: any): string
-				return `{r.id}:{r.n.name}:{r.open}:{r.n.hidden}:{r.n.lock}:{r.depth}:{r.has}:{r.n.wip}:{r.n.by}`
+				return `{r.id}:{r.n.name}:{r.open}:{r.n.hidden}:{r.n.lock}:{r.depth}:{r.has}:{r.n.wip}:{r.n.by}:{r.n.proto}`
 			end,
 			row = function(r: any, i: number): Node
 				return ui.component(function(): Node

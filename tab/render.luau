@@ -30,7 +30,7 @@ function M.register(zeron: any)
 		end
 		-- Only the node shot and what's inside it: a row of a big board
 		-- comes as its few items, not the board's thousands.
-		service:call("scene", { did = e.did, roots = { e.root }, node = e.id, theme = e.theme }):after(function(reply: any)
+		service:call("scene", { did = e.did, roots = { e.root }, node = e.id, theme = e.theme, state = e.state }):after(function(reply: any)
 			local root = root_of(reply, e.root)
 			if not root or not root.nodes or not root.nodes[1] then
 				fail("not_found: no such root")

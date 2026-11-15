@@ -348,8 +348,9 @@ function M.seg(L: any, o: { value: () -> any, options: { { value: any, icon: str
 end
 
 -- pen's checkbox: 16px, r4; on, filled.
-function M.check(L: any, o: { label: string, get: () -> boolean?, set: (on: boolean) -> () }): Node
+function M.check(L: any, o: { label: string, get: () -> boolean?, set: (on: boolean) -> (), id: string? }): Node
 	return ui.row {
+		id = o.id,
 		h = 16,
 		gap = 4,
 		items = "center",
