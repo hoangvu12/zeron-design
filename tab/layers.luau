@@ -364,6 +364,7 @@ function M.Layers(props: { L: any, source: any, hover: any, id: string?, find: a
 			}),
 			-- the chevron
 			ui.div {
+				id = `layer-chev-{n.id}`,
 				w = 12,
 				h = 12,
 				min_w = 12,
@@ -452,6 +453,23 @@ function M.Layers(props: { L: any, source: any, hover: any, id: string?, find: a
 					shrink = 0,
 					ui.div { w = 6, h = 6, rounded = 3, bg = L.agent },
 					ui.text { agent, text_size = 12, weight = 500, color = L.agent_fg, font = Look.UI, truncate = true, max_w = 96 },
+				}
+				else ui.div {},
+			-- (GIF layers) a GIF fill: it plays in Play, the board shows its first frame
+			if n.gif
+				then ui.div {
+					id = `layer-gif-{n.id}`,
+					label = "GIF",
+					tooltip = "Animated GIF: plays in Play and the export",
+					shrink = 0,
+					px = 3,
+					h = 14,
+					rounded = 3,
+					border = 1,
+					border_color = L.faint,
+					items = "center",
+					justify = "center",
+					ui.text { "GIF", text_size = 9, weight = 600, color = L.muted, font = Look.UI },
 				}
 				else ui.div {},
 			-- prototyping: it has states or links (tree's `proto`)

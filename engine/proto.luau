@@ -1078,8 +1078,13 @@ function M.check_prototype(p: any, fail: (string) -> ())
 			if not U.is_null(v) and not (type(v) == "string" and (string.match(v, "^#%x+$") or Resolve.refers(v))) then
 				fail(`prototype.background is a colour "#RRGGBB" or a Token "$name", not {tostring(v)}`)
 			end
+		elseif k == "shareUrl" then
+			-- (f7 share) the Claude artifact the prototype was shared as
+			if not U.is_null(v) and not (type(v) == "string" and (string.match(v, "^https://claude%.ai/artifact/[%w%-_]+/?$") or string.match(v, "^https://claude%.ai/code/artifact/[%w%-_]+/?$"))) then
+				fail(`prototype.shareUrl is the link of the Claude artifact it was shared as ("https://claude.ai/artifact/…" or "https://claude.ai/code/artifact/…"), not {tostring(v)}`)
+			end
 		else
-			fail(`prototype.{tostring(k)} isn't a prototype setting: they are device, model, rotate, fit, deviceFit, showFrame and background`)
+			fail(`prototype.{tostring(k)} isn't a prototype setting: they are device, model, rotate, fit, deviceFit, showFrame, background and shareUrl`)
 		end
 	end
 end

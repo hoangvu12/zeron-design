@@ -785,9 +785,19 @@ local function draw_shadows(c: Canvas, it: any, m: Affine, op: number)
 	end
 end
 
-local function draw_fill(c: Canvas, it: any, m: Affine, op: number)
+-- `skip_gif`: GIF paints left out (Play shows them as live elements);
+-- `past_gif`: only the paints after the first GIF one (what's over it).
+local function draw_fill(c: Canvas, it: any, m: Affine, op: number, skip_gif: boolean?, past_gif: boolean?)
 	local path: Path? = nil
+	local seen_gif = false
 	for _, p in it.fill do
+		if p.gif and (skip_gif or past_gif) then
+			seen_gif = true
+			continue
+		end
+		if past_gif and not seen_gif then
+			continue
+		end
 		if p.k == "image" then
 			local x, y, w, h = canvas_bounds(it, m)
 			local src = p.src or ""
@@ -958,8 +968,13 @@ end
 -- `live`: what a drag shows before the service answers: `maps[id]` an
 -- affine applied (on the Canvas) to that node and all inside it; `boxes[id]`
 -- a new box size for that node alone; `texts[id]` its words as typed;
--- `hide[id]` left out (with what's inside).
-export type Live = { maps: { [string]: Affine }?, boxes: { [string]: { w: number, h: number } }?, texts: { [string]: string }?, hide: { [string]: boolean }? }
+-- `hide[id]` left out (with what's inside); `paints[id]` its `fill`,
+-- `stroke` or `icon` as a colour picker's knob moves (live_paint.luau).
+-- (GIF layers, tab/gif.luau) `gifs[id]`: that node's GIF paints left out
+-- (Play plays them as elements over the canvas); `after = i`: only what
+-- paints over item i's GIF: its later paints, what's inside it, its stroke,
+-- what comes after it, and the strokes of what holds it.
+export type Live = { maps: { [string]: Affine }?, boxes: { [string]: { w: number, h: number } }?, texts: { [string]: string }?, hide: { [string]: boolean }?, paints: { [string]: any }?, gifs: { [string]: boolean }?, after: number? }
 
 -- Whether a frame's stroke can go down before its children, the pixels the
 -- same: no descendant reaches into the band its stroke covers (a margin of
@@ -999,6 +1014,13 @@ function M.draw_root(c: Canvas, root: any, live_of: any?)
 	local sizes = live and live.boxes
 	local texts = live and live.texts
 	local hide = live and live.hide
+	local paints = live and live.paints
+	-- (`live` can be `false`: nil then, never `false`)
+	local gifs: { [string]: boolean }? = if live then live.gifs else nil
+	local after: number? = if live and type(live.after) == "number" then live.after else nil
+	-- (only a paint shown live: nothing moves, the strokes go down as ever;
+	-- over a GIF every stroke goes last, over what it holds)
+	local still = live == nil or (maps == nil and sizes == nil and texts == nil and hide == nil and after == nil)
 	-- Open items: what each closes after its descendants (clip, stroke, its
 	-- opacity and map for them).
 	local stack: { { last: number, it: any, m: Affine, op: number, clip: boolean, map: Affine?, cbox: { number }?, stroked: boolean? } } = {}
@@ -1012,10 +1034,13 @@ function M.draw_root(c: Canvas, root: any, live_of: any?)
 		local it = nodes[i]
 		if i <= skip_to then
 			-- (Inside what's left out.)
-		elseif (hide and hide[it.id]) or it.hidden then
+		elseif (hide and hide[it.id]) or it.hidden or (after and i < after and i + (it.n or 0) < after) then
 			skip_to = i + (it.n or 0)
 			-- (Close what ends here, below.)
 		else
+			-- (over a GIF: what holds it opens (its clip, its stroke later),
+			-- paints nothing under it)
+			local under = after ~= nil and i < after
 			local own = maps and maps[it.id]
 			local map = if own then (if carried then compose(own, carried) else own) else carried
 			local m = M.local_map(it)
@@ -1037,21 +1062,43 @@ function M.draw_root(c: Canvas, root: any, live_of: any?)
 				it.text = table.clone(it.text)
 				it.text.s = words
 			end
+			local look = paints and paints[it.id]
+			if look then
+				it = table.clone(it)
+				if look.fill then
+					it.fill = look.fill
+				end
+				if look.stroke then
+					it.stroke = look.stroke
+				end
+				if look.icon then
+					it.icon = look.icon
+				end
+			end
 			local my_op = op * (it.op or 1)
-			if it.fx then
-				draw_shadows(c, it, m, my_op)
-			end
-			if it.fill and it.t ~= "text" then
-				draw_fill(c, it, m, my_op)
-			end
-			if it.t == "text" then
-				draw_text(c, it, m, my_op, cbox)
-			elseif it.icon then
-				draw_icon(c, it, m, my_op)
+			local own_gif = after ~= nil and i == after
+			if under then
+				-- (nothing of its own)
+			elseif own_gif then
+				if it.fill then
+					draw_fill(c, it, m, my_op, true, true)
+				end
+			else
+				if it.fx then
+					draw_shadows(c, it, m, my_op)
+				end
+				if it.fill and it.t ~= "text" then
+					draw_fill(c, it, m, my_op, gifs ~= nil and gifs[it.id] == true)
+				end
+				if it.t == "text" then
+					draw_text(c, it, m, my_op, cbox)
+				elseif it.icon then
+					draw_icon(c, it, m, my_op)
+				end
 			end
 			local n = it.n or 0
 			-- (a live drag moves boxes: then the stroke goes after, as ever)
-			local early = n > 0 and it.stroke ~= nil and not live and stroke_clear(nodes, i, it)
+			local early = n > 0 and it.stroke ~= nil and still and stroke_clear(nodes, i, it)
 			if early then
 				draw_stroke(c, it, m, my_op)
 			end

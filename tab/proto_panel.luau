@@ -26,6 +26,7 @@ local DeviceFrame = require("./device_frame")
 local Match = require("./proto_match")
 local Toast = require("./toast")
 local IaClip = require("./ia_clip")
+local Share = require("./share")
 
 local M = {}
 local CLEAR = "#00000000"
@@ -305,6 +306,8 @@ function panel(props: PanelProps): Node
 		local pop = ui.popover {
 			open = open,
 			autofocus = false,
+			-- (S7) focus back to the Canvas as it closes (pointer.luau)
+			focus_home = true,
 			label = o.title .. " paint",
 			placement = { side = "left", align = "center", offset = 18 },
 			anchor = ui.div {
@@ -878,6 +881,8 @@ function panel(props: PanelProps): Node
 					end,
 				}),
 			}),
+			-- (f7) "Share link…": a private Claude artifact, through the chat
+			Share.Section { L = L, source = source, sec = sec },
 		}
 	end
 

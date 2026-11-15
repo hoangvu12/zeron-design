@@ -27,6 +27,9 @@ local Smart = require("./smart")
 local Variants = require("./variants")
 local PV = require("./play_vars")
 local DeviceFrame = require("./device_frame")
+local Gif = require("./gif")
+local CommentsUI = require("./comments_ui")
+local PlayGifs = require("./play_gifs")
 
 local M = {}
 
@@ -438,6 +441,10 @@ function M.Play(props: PlayProps): Node
 			end
 			if st.y:peek() ~= y then
 				st.y:set(y)
+			end
+			if dev.cm then
+				-- (step 7: comment pins on what scrolled move with it)
+				dev.cm.moved()
 			end
 		else
 			sd.init = sd.init or {}
@@ -5001,7 +5008,10 @@ function M.Play(props: PlayProps): Node
 		local tw = { duration = math.max(1, d.tr.ms or 150), ease = Proto.ease_of(d.tr) }
 		local function look(which: string?): Node
 			local sub = Proto.subtree(o.root, d, which)
-			return ui.canvas {
+			-- (GIFs in a look play over it, followups README)
+			local gl = PlayGifs.layer(sub, nil)
+			local opacity = if which == "hover" then ui.tween(hover, tw) elseif which == "press" then ui.tween(press, tw) else nil
+			local cv = ui.canvas {
 				id = `play-{d.id}-{which or "rest"}`,
 				absolute = true,
 				left = 0,
@@ -5009,14 +5019,16 @@ function M.Play(props: PlayProps): Node
 				w = ext[3] * z,
 				h = ext[4] * z,
 				pointer_events = "none",
-				opacity = if which == "hover" then ui.tween(hover, tw) elseif which == "press" then ui.tween(press, tw) else nil,
+				opacity = if gl.any then nil else opacity,
 				view = function(): any
 					return { x = -ext[1] * z, y = -ext[2] * z, zoom = z }
 				end,
 				draw = function(c: Canvas)
-					Draw.draw_root(c, sub)
+					local _ = gl.ver:get()
+					Draw.draw_root(c, sub, if gl.ids then { gifs = gl.ids } else nil)
 				end,
 			}
+			return PlayGifs.look(cv, gl, `{d.id}-{which or "rest"}`, { x = ext[1], y = ext[2] }, z, sub, ext, opacity)
 		end
 		local kids: any = {
 			absolute = true,
@@ -5083,6 +5095,13 @@ function M.Play(props: PlayProps): Node
 		end
 		local hide = plan.hide[li]
 		local ver = sd.ver_state
+		-- (GIF layers) the GIFs that play in this layer, left out of its canvas;
+		-- one whose picture decodes later is added then (`gl`, followups)
+		local lroot = Scroll.layer_root(plan, li)
+		sd.gifs = sd.gifs or {}
+		local gl = PlayGifs.layer(lroot, hide, function(n: number)
+			sd.gifs[li] = n
+		end)
 		local px, py
 		if l.k == "content" then
 			local x0, y0 = pos_of(sd, l.i)
@@ -5104,9 +5123,10 @@ function M.Play(props: PlayProps): Node
 				end,
 				draw = function(c: Canvas)
 					local _ = ver and ver:get()
+					local _ = gl.ver:get()
 					local t0 = os.clock()
 					local now = plan_of(sd)
-					Draw.draw_root(c, Scroll.layer_root(now, li), { hide = now.hide[li] or hide })
+					Draw.draw_root(c, Scroll.layer_root(now, li), { hide = now.hide[li] or hide, gifs = gl.ids })
 					table.insert(perf.draw, (os.clock() - t0) * 1000)
 					if #perf.draw > 200 then
 						table.remove(perf.draw, 1)
@@ -5114,6 +5134,7 @@ function M.Play(props: PlayProps): Node
 				end,
 			},
 		}
+		PlayGifs.add(kids, gl, sd.id, org, z, lroot, hide)
 		for lj, lay in plan.layers do
 			if lay.host == li and not (lay.k == "fixed" and lay.inside) then
 				table.insert(kids, ui.component(Layer)({ key = o.key, li = lj, pl = pl, host_org = org }))
@@ -5766,6 +5787,53 @@ function M.Play(props: PlayProps): Node
 		dev.side_now = true
 		dev.side:set({ open = not dev.side_on() })
 	end
+	-- (step 7) Local comments: comment mode (C), pins, the sidebar on the
+	-- right (tab/comments_ui.luau; in `dev` for the locals limit). Not in the
+	-- inline Preview.
+	dev.cm = if dev.pre then nil else CommentsUI.play({
+		D = D,
+		L = L,
+		source = source,
+		current = current,
+		slot = function(key: string): any
+			return slot_data[key]
+		end,
+		overlays = function(): { string }
+			local out = {}
+			for _, k in ov_stack do
+				local od = slot_data[k]
+				if od and not od.spare then
+					table.insert(out, k)
+				end
+			end
+			return out
+		end,
+		to_screen = to_screen,
+		shift_of = shift_of,
+		deepest = Proto.deepest,
+		go = function(id: string)
+			if not busy and root_of(id) then
+				go_to(id, nil, false)
+			end
+		end,
+		hidden = function(): boolean
+			return hide_ui:get()
+		end,
+		stage = function(): any
+			return stage:get()
+		end,
+		stage_v = function(): any
+			return vp:get()
+		end,
+		resized = function()
+			dev.side_now = true
+		end,
+		focus = function()
+			if dev.root_el then
+				dev.root_el:focus()
+			end
+		end,
+	})
 	-- (the Design's device edited while playing: placed anew)
 	ui.effect(function()
 		local _ = source.device and source.device:get()
@@ -5831,6 +5899,14 @@ function M.Play(props: PlayProps): Node
 			end,
 			forward = function(): number
 				return #forward
+			end,
+			-- (step 7) comment mode, the card open, the pins as placed on the stage
+			comments = function(): any
+				return if dev.cm then dev.cm.state() else nil
+			end,
+			-- (for tests) a press on the stage at (x, y), as comment mode takes it
+			comment_press = function(x: number, y: number): boolean
+				return dev.cm ~= nil and dev.cm.press({ local_x = x, local_y = y })
 			end,
 			-- (step 6 P5) Responsive: on, the size laid out, the size being
 			-- fetched, Screens held at it, fetches so far, still pending
@@ -7030,6 +7106,14 @@ function M.Play(props: PlayProps): Node
 		local key = k.key
 		local pre = dev.pre
 		local space = key == " " or key == "Space"
+		if k.editing then
+			-- (step 7: words typed in a comment box are its own)
+			return nil
+		end
+		if dev.cm and key == "Escape" and dev.cm.on:peek() then
+			-- (step 7) Esc closes a comment's card, then leaves comment mode
+			return dev.cm.key(k)
+		end
 		if key == "Escape" and #ov_stack > 0 then
 			-- (an overlay open: Esc closes it first)
 			if not busy then
@@ -7052,6 +7136,10 @@ function M.Play(props: PlayProps): Node
 			return true
 		elseif key_trigger(k) then
 			-- (the Design's own key links win over Play's keys)
+			return true
+		elseif dev.cm and (key == "c" or key == "C") and not k.cmd and not k.alt and not k.shift then
+			-- (step 7, Figma's C) comment mode
+			dev.cm.key(k)
 			return true
 		elseif key == "ArrowLeft" or key == "Backspace" then
 			back()
@@ -7145,6 +7233,8 @@ function M.Play(props: PlayProps): Node
 			end, function(which: string): Node
 				return if which == "vars" then vars_btn() else ui.div {}
 			end),
+			-- (step 7) comment mode
+			if dev.cm then dev.cm.button() else ui.div {},
 			icon_btn("play-back", "Back", "chevLeft", back, "←"),
 			-- (step 6 P6) "1 / N", as Figma's bar without flows
 			ui.show(function(): boolean
@@ -7196,6 +7286,9 @@ function M.Play(props: PlayProps): Node
 				h_full = true,
 				overflow = "hidden",
 				cursor = function(): any
+					if dev.cm and dev.cm.on:get() then
+						return "crosshair" -- (step 7: a click leaves a comment)
+					end
 					return cursor:get()
 				end,
 				on_resize = function(s: { w: number, h: number })
@@ -7205,14 +7298,27 @@ function M.Play(props: PlayProps): Node
 						stage_resized()
 					end
 				end,
-				on_pointer_move = on_move,
+				on_pointer_move = function(e: any)
+					if dev.cm and dev.cm.on:peek() then
+						return -- (step 7: in comment mode the prototype doesn't react)
+					end
+					on_move(e)
+				end,
 				on_press = function(e: any)
+					if dev.cm and dev.cm.press(e) then
+						return
+					end
 					if dev.root_el then
 						dev.root_el:focus()
 					end
 					on_press(e)
 				end,
-				on_release = on_release,
+				on_release = function(e: any)
+					if dev.cm and dev.cm.on:peek() then
+						return
+					end
+					on_release(e)
+				end,
 				on_hover = function(on: boolean)
 					if not on and not pressed then
 						set_hover(nil, nil)
@@ -7351,6 +7457,8 @@ function M.Play(props: PlayProps): Node
 						pointer_events = "none",
 					}),
 				},
+				-- (step 7) comment pins and their card, over the Screen
+				if dev.cm then dev.cm.layer() else ui.div {},
 				-- (step 6 P1) the bar hidden: a faint chip at the top right brings it back
 				ui.show(function(): boolean
 					return hide_ui:get()
@@ -7378,6 +7486,8 @@ function M.Play(props: PlayProps): Node
 					ui.text { "Show UI", text_size = 12, weight = 500, font = Look.UI, color = D.fg },
 				}),
 			},
+			-- (step 7) the comments sidebar, on the right
+			if dev.cm then dev.cm.side() else ui.div {},
 		},
 	}
 end

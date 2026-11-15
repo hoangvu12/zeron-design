@@ -251,19 +251,58 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 	-- The save status the title pill shows: "saved", "saving" (an edit, undo
 	-- or redo on its way: the service saves each as it applies it) or
 	-- "error: <why>" (the last one failed; the next that lands clears it).
+	-- (D5) Kept calm: every keystroke and drag step is an edit, and showing
+	-- "saving" for each flipped the pill at every key. "saving" shows only
+	-- when one save has been on its way for SHOW_AFTER ms (a fast drag keeps
+	-- some save on its way all along, each quick: that isn't slow), and once
+	-- shown it stays at least MIN_SHOWN ms and until nothing has been on its
+	-- way for QUIET ms. An error shows at once.
+	local SHOW_AFTER, MIN_SHOWN, QUIET = 400, 600, 300
 	local save = ui.state(`design.{did}.save`, "saved")
+	save:set("saved")
 	local pending = 0
-	local function begin()
+	local out: { [number]: boolean } = {} -- the saves on their way, by ticket
+	local ticket = 0 -- bumped by each save: a "back to saved" timer for an older one does nothing
+	local shown_at = 0
+	local function begin(): number
 		pending += 1
-		save:set("saving")
+		ticket += 1
+		local t = ticket
+		out[t] = true
+		ui.after(SHOW_AFTER, function()
+			if not disposed and out[t] and save:peek() ~= "saving" then
+				shown_at = ui.now()
+				save:set("saving")
+			end
+		end)
+		return t
 	end
-	local function landed(err: any?)
+	local function landed(t: number, err: any?)
+		out[t] = nil
 		pending = math.max(0, pending - 1)
 		if err ~= nil then
 			save:set(`error: {err}`)
-		elseif pending == 0 then
-			save:set("saved")
+			return
 		end
+		if pending > 0 then
+			return
+		end
+		local s = save:peek()
+		if s ~= "saving" then
+			if s ~= "saved" then
+				save:set("saved") -- an error cleared by a save that landed
+			end
+			return
+		end
+		-- (And QUIET ms with nothing new on its way: edits still coming with
+		-- short gaps keep it on "saving".)
+		local left = math.max(MIN_SHOWN - (ui.now() - shown_at), QUIET)
+		local b = ticket
+		ui.after(left, function()
+			if not disposed and pending == 0 and ticket == b and save:peek() == "saving" then
+				save:set("saved")
+			end
+		end)
 	end
 
 	local source = { roots = roots, selection = selection, ia_sel = ia_sel, flashes = flashes, dark = o.dark, status = status, save = save, chat_title = o.chat_title, flows = flows, prototype = prototype, device = device }
@@ -307,14 +346,14 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 
 	function source.edit(ops: { any }, label: string?, eo: any?)
 		local e = eo or {}
-		begin()
+		local t = begin()
 		service:call("edit", { did = did, ops = ops, label = label, join = e.join }):after(function(res: any)
-			landed()
+			landed(t)
 			if e.done then
 				e.done(true, res)
 			end
 		end, function(err: any)
-			landed(err)
+			landed(t, err)
 			say(`edit: {err}`)
 			if e.done then
 				e.done(false, err)
@@ -323,21 +362,21 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 	end
 
 	function source.undo()
-		begin()
+		local t = begin()
 		service:call("undo", { did = did }):after(function()
-			landed()
+			landed(t)
 		end, function(err: any)
-			landed(err)
+			landed(t, err)
 			say(tostring(err))
 		end)
 	end
 
 	function source.redo()
-		begin()
+		local t = begin()
 		service:call("redo", { did = did }):after(function()
-			landed()
+			landed(t)
 		end, function(err: any)
-			landed(err)
+			landed(t, err)
 			say(tostring(err))
 		end)
 	end
@@ -346,8 +385,50 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		service:call("select", { did = did, ids = ids }):after(function() end, function() end)
 	end
 
+	-- (step 7) Local comments (tab/comments_ui.luau): the Design's pins with
+	-- their replies, asked again on each `comments` event; `comment` sends one
+	-- action ({ action = "add" | "reply" | "edit" | "resolve" | "reopen" |
+	-- "delete", … }) and `done(ok, result or error)`.
+	local comments = ui.state(`design.{did}.comments`, {} :: { any })
+	local function load_comments()
+		service:call("comments", { did = did }):after(function(r: any)
+			if not disposed and type(r) == "table" and type(r.comments) == "table" then
+				comments:set(r.comments)
+			end
+		end, function(err: any)
+			say(`comments: {err}`)
+		end)
+	end
+	load_comments()
+	table.insert(offs, service:on("comments", function(e: any)
+		if type(e) == "table" and e.did == did then
+			load_comments()
+		end
+	end))
+	source.comments = comments
+	function source.comment(args: any, done: ((ok: boolean, r: any) -> ())?)
+		local a = table.clone(args)
+		a.did = did
+		service:call("comment", a):after(function(r: any)
+			if done then
+				done(true, r)
+			end
+		end, function(err: any)
+			say(`comment: {err}`)
+			if done then
+				done(false, err)
+			end
+		end)
+	end
+
 	source.reload = load
 	source.name = o.name
+	source.did = did
+	-- (f7 share) words into the chat's message box ("compose"), for the
+	-- person to send.
+	function source.compose(text: string)
+		zeron.compose(text)
+	end
 
 	-- The layers list (`tree`), asked again as the Design changes.
 	-- (Held in Luau, as the roots are: a state would hold the whole list
@@ -529,6 +610,7 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		tree:set({})
 		flashes:set({})
 		last_changed:set(nil)
+		comments:set({})
 	end
 
 	return source

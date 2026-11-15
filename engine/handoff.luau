@@ -17,6 +17,7 @@
 -- the next call, which the result says how to make.
 
 local Export = require("./export")
+local Share = require("./share")
 
 local M = {}
 
@@ -154,6 +155,24 @@ function M.run(d: any, entries: { any }, io: any): (any, { any })
 		if e.format == "html" then
 			local base = if e.ids and e.ids[1] then name_of(e.ids[1]) else "index"
 			put(folder, unique(base, "html", ".html"), e.html, false, "html")
+		elseif e.format == "share" then
+			-- (f7 share) one page, pictures inside, for a Claude artifact
+			local prep = Share.prepare(e.html, d.doc, function(url: string)
+				return if io.image then io.image(url) else nil
+			end, d.name)
+			local link = type(d.doc.prototype) == "table" and d.doc.prototype.shareUrl or nil
+			local info: any = { bytes = prep.bytes, pictures = #prep.images, link = link, privacy = Share.PRIVACY }
+			for _, n in prep.notes or {} do
+				table.insert(notes, n)
+			end
+			if not prep.ok then
+				info.error = prep.error
+				table.insert(notes, prep.error)
+			elseif put(folder, unique(M.slug(d.name, "design") .. "-share", "share", ".html"), prep.html, false, "share") then
+				info.file = files[#files].path
+				info.steps = Share.steps(info.file, link)
+			end
+			out.share = info
 		elseif e.format == "png" then
 			local id = e.id
 			if not png(folder, id, e.scale or 2, unique(name_of(id), (string.gsub(id, "/", "-")), ".png"), { id = id }) then

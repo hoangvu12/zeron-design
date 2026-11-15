@@ -12,6 +12,8 @@ You can't open a Design tab. To show the person a Design, tell them to open Desi
 
 `design_state` also says what the person has selected in each open Design (inside an Instance, `instance/node`). When they say "this" or "make it bigger", call `design_state` first and act on those ids. The person may move, retype and restyle nodes by hand while you work, and undo either of you: if your result has a `notice`, read the Design again before you change what you didn't just make.
 
+`design_state` also lists the open **comments** the person left on Screens in Play (`comments`: `id`, `n` (the pin's number), `screen`, `screenName`, `node` (the layer under the pin), `text`, `replies`). When they say "fix the comments", fix each, then `ResolveComment(id, "what you changed")`; `ReplyComment(id, text)` asks back instead. Both happen only when the call succeeds. `GetComments()` reads them in a snippet (`{ all = true }`: resolved too). Recipe: `design_guide { topic = "prototyping" }`, "Comments from Play".
+
 This guide is the rules, the API and the format, how to check your work, and how to design well. Topic guides go deeper: call `design_guide` with `components`, `design-systems`, `landing-pages`, `mobile-apps`, `web-apps`, `slides`, `tables`, `code`, `tailwind` or `prototyping`.
 
 ## The working loop
@@ -193,6 +195,7 @@ For whoever implements the Design; it's for delivery, not for checking your work
 - `Export({ ids }, { format = "html", css, scaffold, layerNames })`: Screens (every Screen with no ids) as one HTML file. `css` is `"css"` (plain, the default) or `"tailwind"`; `scaffold = false` gives just the Screens and their styles instead of a whole page; `layerNames = true` puts each node's name on its element as `data-name`. Auto layout becomes flexbox and Tokens become CSS variables; it's a starting point to adapt, not production code.
 - `Export({ format = "html", prototype = true })`: a clickable prototype: one page, each Screen a section, links as real links with their transitions. Hover and press states export in every HTML export.
 - `Export({ ids }, { format = "png", scale })`: each node as a PNG file, at `scale` (2 by default, at most 8).
+- `Export({ share = true })`: the prototype as one page to share (every Screen, or those in ids; `css` as above): the Design's pictures inside, Tailwind pinned, written as `<Design>-share.html`. `exported.share` has `file`, `bytes`, `link` (the artifact it was shared as before) and `steps`. Only when the person asks to share: see Sharing in the prototyping guide.
 
 ```luau
 Export({ format = "handoff" })
@@ -261,7 +264,7 @@ What isn't there, and what to do instead:
 - A hex string: `"#RGB"`, `"#RRGGBB"` or `"#RRGGBBAA"`.
 - `{ type = "color", color, opacity, blendMode, enabled }`.
 - `{ type = "gradient", gradientType = "linear" | "radial" | "angular", colors = { { color, position } }, center = { x, y }, size = { width, height }, rotation }`. Geometry is relative to the node's bounds (`center` 0 to 1, `size` 1 = the side). At `rotation = 0` a linear gradient runs upward (bottom colour first, top colour last); rotation is counter-clockwise. `colors` can also be plain hex strings, spaced evenly.
-- `{ type = "image", url, mode = "cover" | "contain" | "stretch" }`. `url` is an http(s) URL. A missing image draws as a placeholder. Images are fills only.
+- `{ type = "image", url, mode = "cover" | "contain" | "stretch" }`. `url` is an http(s) URL. A missing image draws as a placeholder. Images are fills only. An animated GIF (a `.gif` URL, or a GIF picture the person added) is a plain image fill: the board shows its first frame, Play and the export play it. Keep a GIF at most 8 MB and 1024 px a side. Play plays up to 16 per Screen when they're small (big ones: 4; more show their first frame). A turned GIF plays upright in its bounding box, as the board draws every picture; one inside a turned frame that clips shows its first frame in Play.
 
 `blendMode` is `normal`, `darken`, `multiply`, `colorBurn`, `lighten`, `screen`, `colorDodge`, `linearDodge`, `overlay`, `softLight`, `hardLight`, `difference`, `exclusion`, `hue`, `saturation`, `color` or `luminosity`.
 
@@ -1964,6 +1967,39 @@ assert(Eval("panel", nil, { mode = { theme = "dark" } }) == "#1E293B", "the card
 
 A `"mode theme=dark"` step switches only the mode; set `dark` too (`"set dark=true"`) to keep the switch in step.
 
+## Comments from Play
+
+In Play the person presses **C** (or the comment button), clicks a Screen and types: a numbered pin on that spot, kept on this device with the Design. `design_state` lists the open ones per open Design; in a snippet:
+
+```luau
+for _, c in GetComments() do          -- open ones; GetComments({ all = true }) adds resolved
+  Print(c.n, c.screenName, c.node, c.text, c.replies)
+end
+```
+
+Fix the open comments, one call per change or all in one:
+
+```luau
+local open = GetComments()            -- each { id, n, screen, screenName, node?, x, y, text, author, replies? }
+local c = open[1]
+if c then
+  -- `node`: the layer under the pin (it may be gone: check before changing it)
+  if c.node and pcall(Get, c.node) then
+    Update(c.node, { opacity = 1 })
+  end
+  ResolveComment(c.id, "Done: the title is 32 now")   -- resolves it, the note as your reply
+  TakeScreenshot(c.screen)
+end
+if open[2] then
+  ReplyComment(open[2].id, "Which button: Get started or Skip?")  -- ask instead of guessing
+end
+```
+
+- `x`, `y` are points on the Screen from its top-left; the pin follows `node` when that layer moves.
+- `ResolveComment` / `ReplyComment` take an `id` or the pin's number `n`; they happen only if the whole call succeeds (a failed call leaves comments as they were), and the result says `comments = { done = n }`.
+- Resolve only what you changed; reply to what's unclear. Never delete the person's comments.
+- Comments stay on this device (not in exports, not synced).
+
 ## Checking
 
 ```luau
@@ -2015,6 +2051,17 @@ Update(G.back, { interactions = { { trigger = "click", actions = {
 - with JavaScript off, the links still jump between Screens.
 
 Hover and press states are in every HTML export, as CSS `:hover` and `:active`.
+
+### Sharing a link
+
+When the person asks for a link to the prototype (the Prototype panel's "Share link…" button writes that ask in their message box), share it as a private Claude artifact. This needs the `Artifact` tool (a Claude Code chat signed in to claude.ai); without it, say so and give them the file instead.
+
+1. `design_execute` with `Export({ share = true })`. It writes `<Design>-share.html`: one page, pictures inside. If `exported.share.error` says it's too big, tell the person which pictures to make smaller.
+2. Publish `exported.share.file` with the `Artifact` tool exactly as it is: it's the person's prototype, don't restyle or rewrite it. When `exported.share.link` is set, pass it as `url` so the same link updates.
+3. `SetPrototype({ shareUrl = "<the artifact's link>" })` so the next share updates it (`shareUrl = null` forgets it).
+4. Give the person the link and say it's private until they share it from claude.ai.
+
+Never publish unless the person asked to share.
 ]]
 
 M.ORDER = { "components", "design-systems", "landing-pages", "mobile-apps", "web-apps", "slides", "tables", "code", "tailwind", "prototyping" }

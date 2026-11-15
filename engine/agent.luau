@@ -15,6 +15,7 @@ local Sim = require("./sim")
 local Scene = require("./scene")
 local Vars = require("./vars")
 local Expr = require("./expr")
+local Comments = require("./comments")
 local Smart = require("../tab/smart")
 
 local M = {}
@@ -672,6 +673,52 @@ function M.env(draft: any, zeron: any, G: any, chat: string?): any
 	env.GetPrototype = api("GetPrototype", function()
 		return U.deep_copy(draft.d.doc.prototype or {})
 	end)
+	-- (step 7) Local comments the person left on Screens in Play
+	-- (engine/comments.luau). GetComments(opts?) → the open ones ({ all = true }:
+	-- resolved too; { screen = id }: one Screen's), each { id, n, screen,
+	-- screenName, node, x, y, text, author, replies? }. ResolveComment(id,
+	-- note?) and ReplyComment(id, text) happen once the call ran through
+	-- (a failed call does nothing to comments).
+	local function comment_of(id: any): any
+		id = id_of(id)
+		for _, t in (draft.comments or {}) do
+			if t.id == id or ("#" .. tostring(t.n)) == id or (type(id) == "string" and tonumber(id) == t.n) then
+				return t
+			end
+		end
+		draft:fail(`no comment "{tostring(id)}" (ids come from GetComments or design_state)`)
+		return nil
+	end
+	env.GetComments = api("GetComments", function(opts: any)
+		opts = if type(opts) == "table" then opts else {}
+		local list = Comments.for_agents(draft.comments or {}, draft.d.doc, opts.all == true)
+		if type(opts.screen) == "string" then
+			local only = {}
+			for _, c in list do
+				if c.screen == id_of(opts.screen) then
+					table.insert(only, c)
+				end
+			end
+			list = only
+		end
+		return list
+	end)
+	env.ResolveComment = api("ResolveComment", function(id: any, note: any)
+		local t = comment_of(id)
+		if note ~= nil and type(note) ~= "string" then
+			draft:fail("ResolveComment's note is text (what you changed), or nil")
+		end
+		table.insert(draft.comment_ops, { action = "resolve", id = t.id, note = note })
+		return t.id
+	end)
+	env.ReplyComment = api("ReplyComment", function(id: any, text: any)
+		local t = comment_of(id)
+		if type(text) ~= "string" or text == "" then
+			draft:fail("ReplyComment needs the reply's words")
+		end
+		table.insert(draft.comment_ops, { action = "reply", id = t.id, text = text })
+		return t.id
+	end)
 	-- Plays the prototype headless by Play's rules (engine/sim.luau):
 	-- Simulate(start?, steps?, opts?) or Simulate({ start, steps, shots,
 	-- check }). Returns what's shown after the steps and the problems met;
@@ -778,6 +825,22 @@ function M.env(draft: any, zeron: any, G: any, chat: string?): any
 			draft:fail("Export's folder is a path (text)")
 		end
 		local folder, inline = opts.folder, opts.inline == true
+		-- (f7 share) Export({ share = true }): the whole prototype as one page
+		-- to publish as a private Claude artifact (engine/share.luau): written
+		-- as <Design>-share.html, its pictures inside.
+		if opts.share == true then
+			if #list == 0 then
+				for _, b in require("./handoff").boards(draft.d.doc) do
+					table.insert(list, b.id)
+				end
+			end
+			if #list == 0 then
+				draft:fail("Export share needs a Screen to share: this Design has none")
+			end
+			local html = Export.html(draft.d.doc, list, { css = opts.css, scaffold = true, icons = M.icons, prototype = true })
+			table.insert(draft.exported, { format = "share", css = opts.css or "css", html = html, ids = list, folder = folder })
+			return { "share" }
+		end
 		if format == "html" then
 			local html = Export.html(draft.d.doc, list, { css = opts.css, scaffold = opts.scaffold, layerNames = opts.layerNames, icons = M.icons, prototype = opts.prototype == true })
 			table.insert(draft.exported, { format = "html", css = opts.css or "css", html = html, ids = list, folder = folder, inline = inline })
@@ -954,6 +1017,9 @@ function M.execute(zeron: any, d: any, snippet: string, description: string, cha
 	local key = "G:" .. (chat or "none")
 	local G = Designs.kv_get(key) or {}
 	local draft = Edit.draft(d)
+	-- (step 7) the Design's comments as the call began, and what it does to them
+	draft.comments = if type(opts.comments) == "table" then opts.comments else {}
+	draft.comment_ops = {}
 	local env = M.env(draft, zeron, G, chat)
 	local t0 = os.clock()
 	local ran = table.pack(zeron.eval(snippet, { name = "agent", env = env, budget_ms = M.BUDGET_MS }))

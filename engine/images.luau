@@ -11,6 +11,11 @@ local M = {}
 local zeron: any = nil
 local ready = false
 M.MAX_BYTES = 15 * 1024 * 1024
+M.GIF_MAX_BYTES = 8 * 1024 * 1024
+M.GIF_WARN_SIDE = 1024
+-- In a links() map, `map[M.GIF .. url]` is true when that url's picture is
+-- a GIF (a prefix no url typed has), so the scene marks its paint `gif`.
+M.GIF = "\0gif\0"
 
 function M.init(z: any)
 	zeron = z
@@ -284,6 +289,17 @@ function M.put(base64: string): any
 	if not mime then
 		error("bad_params: that isn't a PNG, JPEG, WebP or GIF", 0)
 	end
+	-- (GIF layers, pure/anim/f7/gif: a GIF plays in Play as a live element,
+	-- each frame kept by zgx; past 8 MB it's refused, past 1024 px a warning)
+	local warning = nil
+	if mime == "image/gif" then
+		if size > M.GIF_MAX_BYTES then
+			error("bad_params: a GIF is at most 8 MB", 0)
+		end
+		if (w or 0) > M.GIF_WARN_SIDE or (h or 0) > M.GIF_WARN_SIDE then
+			warning = `this GIF is {w}×{h}: past {M.GIF_WARN_SIDE} px a side it costs a lot of memory as it plays; make it smaller if you can`
+		end
+	end
 	local hashed = M.key(text, function()
 		zeron.sleep(0):await()
 	end)
@@ -292,7 +308,7 @@ function M.put(base64: string): any
 	if not there then
 		zeron.db.exec("INSERT INTO images (key, mime, w, h, size, data, at) VALUES (?, ?, ?, ?, ?, ?, ?)", { key, mime, w or 0, h or 0, size, text, os.time() }):await()
 	end
-	return { key = key, mime = mime, w = w, h = h, size = size }
+	return { key = key, mime = mime, w = w, h = h, size = size, warning = warning }
 end
 
 function M.get(key: string): any?
@@ -311,12 +327,16 @@ function M.link(did: string, url: string, key: string)
 	zeron.db.exec("INSERT OR REPLACE INTO image_links (did, url, key) VALUES (?, ?, ?)", { did, url, key }):await()
 end
 
--- url → "img:<key>" for a Design's linked pictures (the scene's `images`).
-function M.links(did: string): { [string]: string }
+-- url → "img:<key>" for a Design's linked pictures (the scene's `images`),
+-- and `[M.GIF .. url] = true` for those that are GIFs.
+function M.links(did: string): { [string]: any }
 	schema()
 	local out = {}
-	for _, r in zeron.db.query("SELECT url, key FROM image_links WHERE did = ?", { did }):await() do
+	for _, r in zeron.db.query("SELECT l.url AS url, l.key AS key, i.mime AS mime FROM image_links l LEFT JOIN images i ON i.key = l.key WHERE l.did = ?", { did }):await() do
 		out[r.url] = "img:" .. r.key
+		if r.mime == "image/gif" then
+			out[M.GIF .. r.url] = true
+		end
 	end
 	return out
 end

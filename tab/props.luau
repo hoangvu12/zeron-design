@@ -22,6 +22,7 @@ local Look = require("./look")
 local Layers = require("./layers")
 local Picker = require("./picker")
 local Bind = require("./bind")
+local LivePaint = require("./live_paint")
 
 local Pdf = require("./pdf")
 
@@ -593,7 +594,7 @@ function M.Props(props: PropsProps): Node
 	end
 
 	-- Edits: one call, every selected node.
-	local function update(make: { [string]: any } | (s: any) -> { [string]: any }, label: string, live: boolean?)
+	local function update(make: { [string]: any } | (s: any) -> { [string]: any }, label: string, live: boolean?, done: ((ok: boolean) -> ())?)
 		local ops = {}
 		for _, s in sel do
 			local p = if type(make) == "function" then make(s) else make
@@ -607,7 +608,7 @@ function M.Props(props: PropsProps): Node
 			end
 		end
 		if #ops > 0 then
-			source.edit(ops, label, { join = live })
+			source.edit(ops, label, { join = live, done = done })
 		end
 	end
 
@@ -1662,6 +1663,9 @@ function M.Props(props: PropsProps): Node
 		-- kind), and the picker stays open across it, built from the new paint.
 		local key = `{sel_key}|{o.id}`
 		local open = ui.use_state(picker_open:peek() == key)
+		-- (D3) the colour a picker's knob is at, shown in the swatch and the
+		-- hex while it moves (no edit till it's let go)
+		local moving = ui.use_state(nil :: string?)
 		ui.effect(function()
 			local on = open:get()
 			local held = picker_open:peek()
@@ -1698,6 +1702,8 @@ function M.Props(props: PropsProps): Node
 				open = open,
 				-- (kept off: a rebuild mid-edit would move focus to its first control)
 				autofocus = false,
+				-- (S7) focus back to the Canvas as it closes (pointer.luau)
+				focus_home = true,
 				label = o.title .. " paint",
 				placement = { side = "left", align = a, offset = 18 },
 				anchor = ui.div {
@@ -1708,7 +1714,7 @@ function M.Props(props: PropsProps): Node
 					pr = 4,
 					cursor = "pointer",
 					Kit.swatch(L, function(): string
-						return swatch
+						return moving:get() or swatch
 					end, function()
 						local a2 = choose_align()
 						picker_align[key] = a2
@@ -1734,6 +1740,9 @@ function M.Props(props: PropsProps): Node
 						commit = function(np: any, live: boolean)
 							if o.solid_only and type(np) ~= "string" then
 								return
+							end
+							if live and type(np) == "string" and string.sub(np, 1, 1) == "#" then
+								moving:set(np)
 							end
 							o.commit(np, live)
 						end,
@@ -1810,7 +1819,8 @@ function M.Props(props: PropsProps): Node
 			tip = o.title .. " colour",
 			leading = ui.div { shrink = 0, h = 16, items = "center", pop },
 			value = function(): string?
-				return label
+				local m = moving:get()
+				return if m then string.upper(string.sub(m, 2, 7)) else label
 			end,
 			fg = if bound then L.accent_fg else nil,
 			-- (step 5, V5b) a bound colour reads as the other bound chips
@@ -1839,11 +1849,32 @@ function M.Props(props: PropsProps): Node
 		if not mixed and list then
 			for i, p in list do
 				local function set_paint(np: any, live: boolean)
+					-- (D3) While a picker's knob moves, the colour shows on the
+					-- board alone (live_paint.luau): no edit, so the panel and
+					-- the picker under the pointer aren't built again at every
+					-- move. Let go: one edit, one undo step.
+					local shown = false
+					if live and type(np) == "string" and source.roots then
+						for _, s in sel do
+							if LivePaint.show(source.roots, s.id, key, paints_of(get(s)), i, np) then
+								shown = true
+							end
+						end
+					end
+					if shown then
+						return
+					end
 					update(function(s: any): { [string]: any }
 						local l = table.clone(paints_of(get(s)))
 						l[i] = np
 						return put(s, pack_paints(l))
-					end, "Change " .. string.lower(title), live)
+					end, "Change " .. string.lower(title), live, function(ok: boolean)
+						if not ok and source.roots then
+							for _, s in sel do
+								LivePaint.clear(source.roots, s.id)
+							end
+						end
+					end)
 				end
 				local enabled = not (type(p) == "table" and p.enabled == false)
 				table.insert(
@@ -2266,8 +2297,12 @@ function M.Props(props: PropsProps): Node
 							title = "Shadow",
 							paint = e.color or "#00000040",
 							solid_only = true,
-							commit = function(np: any, _live: boolean)
-								set_fx("color", np)
+							commit = function(np: any, live: boolean)
+								-- (D3) not at every move of a knob: each edit built the
+								-- panel again and the picker lost the drag; one on release
+								if not live then
+									set_fx("color", np)
+								end
 							end,
 						})
 					)

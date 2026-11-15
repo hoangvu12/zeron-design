@@ -32,6 +32,7 @@ local Play = require("./play")
 local PlayPlace = require("./play_place")
 local ProtoPanel = require("./proto_panel")
 local IaClip = require("./ia_clip")
+local CommentsUI = require("./comments_ui")
 
 local M = {}
 
@@ -106,6 +107,13 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 	local theme_pick = ui.use_state({} :: { [string]: string })
 	local api: any = nil
 	local api_ready = ui.use_state(false)
+	-- (S7) a panel's popover (a colour picker…) gives focus back to the Canvas
+	-- as it closes, so Ctrl+Z and the shortcuts work at once (pointer.luau)
+	Pointer.set_home(function()
+		if api and api.focus then
+			api.focus()
+		end
+	end)
 
 	local function load_tokens()
 		if source.tokens then
@@ -115,6 +123,27 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 		end
 	end
 	load_tokens()
+	-- (S7) An Undo or Redo can change a variable: ask for them again after it
+	-- (the Variables panel and the pickers' lists kept the old values). The
+	-- service answers calls in order, as after an edit. Wrapped once per
+	-- source; each mounted Shell points the hook at its own loader.
+	if not source.history_hooked and type(source.undo) == "function" then
+		source.history_hooked = true
+		local undo, redo = source.undo, source.redo
+		source.undo = function(...: any)
+			undo(...)
+			if source.on_history then
+				source.on_history()
+			end
+		end
+		source.redo = function(...: any)
+			redo(...)
+			if source.on_history then
+				source.on_history()
+			end
+		end
+	end
+	source.on_history = load_tokens
 
 	-- The selected nodes as their file has them, for the properties panel:
 	-- asked again as the selection or what's drawn changes.
@@ -470,7 +499,47 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 
 	-- The left panel's tabs: 32px icon buttons at the head's right (active:
 	-- accent_soft, the icon in accent).
-	local TAB_NAMES = { layers = "Layers", components = "Components" }
+	local TAB_NAMES = { layers = "Layers", components = "Components", comments = "Comments" }
+	-- (step 7) Local comments in the editor: the left panel's Comments tab
+	-- lists them; while it's open their pins show on the board (elements over
+	-- the Canvas, not drawn into it). `cmt.open`: a pin's card open.
+	local cmt = { open = ui.use_state(nil :: string?), resolved = ui.use_state(false) }
+	function cmt.names(): { [string]: string }
+		local out = {}
+		for _, r in source.roots:peek() do
+			local n = r.nodes and r.nodes[1]
+			if n then
+				out[r.id] = n.name or r.id
+			end
+		end
+		return out
+	end
+	function cmt.pins(): { any }
+		if left_tab:get() ~= "comments" or not api_ready:get() or not api or not source.comments then
+			return {}
+		end
+		local v = api.view:get()
+		local i = api.index:get()
+		if not v or not i then
+			return {}
+		end
+		local out = {}
+		local res = cmt.resolved:get()
+		for _, t in source.comments:get() or {} do
+			local sb = i.by[t.screen]
+			if sb and (res or not t.resolved) then
+				local nb = t.node and i.by[t.node]
+				local x, y
+				if nb and type(t.nx) == "number" then
+					x, y = nb.bounds[1] + t.nx, nb.bounds[2] + t.ny
+				else
+					x, y = sb.bounds[1] + t.x, sb.bounds[2] + t.y
+				end
+				table.insert(out, { t = t, x = v.x + x * v.zoom, y = v.y + y * v.zoom })
+			end
+		end
+		return out
+	end
 	local function tab_btn(id: string, label: string, icon: string): Node
 		return ui.button {
 			id = `left-tab-{id}`,
@@ -976,9 +1045,33 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			},
 			tab_btn("layers", "Layers", "layers"),
 			tab_btn("components", "Components", "component"),
+			tab_btn("comments", "Comments", "message"),
 		},
 		ui.div { w_full = true, h = 1, bg = L.border, shrink = 0 },
 		ui.presence(left_tab, function(which: string): Node
+			if which == "comments" then
+				-- (step 7) the Design's comments; a click shows its Screen and its card
+				return CommentsUI.List {
+					L = L,
+					prefix = "left-comments",
+					list = source.comments,
+					names = cmt.names,
+					first = function(): string?
+						return nil
+					end,
+					resolved = cmt.resolved,
+					picked = function(): string?
+						return cmt.open:get()
+					end,
+					chat_title = source.chat_title,
+					pick = function(t: any)
+						if api and api.zoom_to_root and t.screen then
+							api.zoom_to_root(t.screen)
+						end
+						cmt.open:set(t.id)
+					end,
+				}
+			end
 			if which == "components" then
 				return Components.Tab {
 					L = L,
@@ -2145,6 +2238,10 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 				panel_tab:set("prototype")
 				props_open:set(true)
 			end },
+			-- (f7) a private Claude artifact: the prompt into the chat's message box
+			{ section = "Prototype", label = "Share link…", icon = "link", run = function()
+				require("./share").send(source)
+			end },
 			{ section = "Help", label = "Keyboard shortcuts", icon = "keyboard", keys = { "?" }, run = function()
 				shortcuts_open:set(true)
 			end },
@@ -2417,6 +2514,10 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			if k.editing then
 				return nil
 			end
+			-- (D2) a text just drawn, its editor not open yet: the keys are its words
+			if api and api.await_key and api.await_key(k) then
+				return true
+			end
 			local key = k.key
 			if key == "?" then
 				shortcuts_open:set(not shortcuts_open:peek())
@@ -2519,6 +2620,30 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 				end)
 			end,
 		},
+		-- (step 7) comment pins on the board while the Comments tab is open
+		if source.comments then CommentsUI.Pins {
+			L = L,
+			prefix = "board-comment",
+			pins = cmt.pins,
+			open = cmt.open,
+			list = function(): { any }
+				return source.comments:get() or {}
+			end,
+			size = function(): any
+				return { w = width:get(), h = pre.hgt:get() }
+			end,
+			act = function(args: any, done: any?)
+				if source.comment then
+					source.comment(args, done)
+				end
+			end,
+			post = function(_t: string) end,
+			names = cmt.names,
+			chat_title = source.chat_title,
+			hidden = function(): boolean
+				return left_tab:get() ~= "comments"
+			end,
+		} else ui.div {},
 		title,
 		ui.show(function(): boolean
 			return left_open:get()

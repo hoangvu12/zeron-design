@@ -154,9 +154,13 @@ function M.Panel(props: PanelProps): Node
 	local axis_pick = ui.use_state(nil :: string?)
 	-- (a variable just added: its name field takes the focus as it shows)
 	local focus_next = ui.use_state(nil :: string?)
+	-- (S7) Which colour picker is open ("name|column", else ""): held here, as
+	-- Properties' `picker_open`, since a new value builds its row again and
+	-- the picker stays open across that.
+	local picker_open = ui.use_state("")
 
-	local function edit(ops: { any }, label: string, live: boolean?)
-		source.edit(ops, label, { join = live == true })
+	local function edit(ops: { any }, label: string, live: boolean?, done: ((ok: boolean) -> ())?)
+		source.edit(ops, label, { join = live == true, done = done })
 		props.reload()
 	end
 
@@ -296,19 +300,58 @@ function M.Panel(props: PanelProps): Node
 	-- A colour's cell: the swatch (the paint picker), its hex, its %.
 	local function colour_cell(name: string, axis: string?, cols: { string }, col: string): Node
 		return ui.component(function(): Node
-			local open = ui.use_state(false)
+			local key = `{name}|{col}`
+			local open = ui.use_state(picker_open:peek() == key)
+			ui.effect(function()
+				local on = open:get()
+				local held = picker_open:peek()
+				if on and held ~= key then
+					picker_open:set(key)
+				elseif not on and held == key then
+					picker_open:set("")
+				end
+			end)
 			local function value(): string?
 				local r = by_name:get()[name]
 				local v = r and token_value(r, axis, col)
 				return if type(v) == "string" then v else nil
 			end
+			-- (S7) The colour the picker's knob is at while it moves: the swatch,
+			-- hex and % show it, and no edit is sent till it's let go (one edit,
+			-- one undo step; an edit a move rebuilt the picker and lost the drag,
+			-- as D3 found in Properties). The board isn't previewed: its scene
+			-- holds resolved colours, not which layers use the variable.
+			-- Kept after the release till the new value comes back (no flash of
+			-- the old colour), dropped when it does or the edit fails.
+			local moving = ui.use_state(nil :: string?)
+			local function shown(): string?
+				return moving:get() or value()
+			end
+			ui.effect(function()
+				value()
+				moving:set(nil)
+			end)
 			local function set(v: string, live: boolean?)
 				local r = by_name:peek()[name]
-				if r then
-					edit({ { op = "tokens", tokens = { [name] = token_with(r, axis, cols, col, v) } } }, "Change variable", live)
+				if not r then
+					return
 				end
+				if live then
+					moving:set(v)
+					return
+				end
+				if moving:peek() ~= nil then
+					moving:set(v)
+				end
+				edit({ { op = "tokens", tokens = { [name] = token_with(r, axis, cols, col, v) } } }, "Change variable", false, function(ok: boolean)
+					if not ok then
+						moving:set(nil)
+					end
+				end)
 			end
 			local swatch = ui.div {
+				-- (for tests: "color/accent", "light" -> #var-swatch-color-accent-light)
+				id = `var-swatch-{(string.gsub(name, "[^%w]", "-"))}-{col}`,
 				w = 14,
 				h = 14,
 				shrink = 0,
@@ -330,12 +373,17 @@ function M.Panel(props: PanelProps): Node
 					w = 14,
 					h = 14,
 					bg = function(): string
-						return value() or CLEAR
+						return shown() or CLEAR
 					end,
 				},
 			}
 			local pop = ui.popover {
 				open = open,
+				-- (S7) focus back to the Canvas as it closes (pointer.luau); kept
+				-- off as it opens, as Properties' (a row built again with it open
+				-- would move focus to its first control)
+				focus_home = true,
+				autofocus = false,
 				label = `{name} {col} colour`,
 				placement = { side = "bottom", align = "start", offset = 8 },
 				anchor = swatch,
@@ -367,7 +415,7 @@ function M.Panel(props: PanelProps): Node
 			local pct = ui.input {
 				label = `{name} {col} opacity`,
 				value = function(): string
-					local c = Picker.parse(value() or "")
+					local c = Picker.parse(shown() or "")
 					return tostring(if c then math.floor(c.a * 100 + 0.5) else 100)
 				end,
 				on_commit = function(t: string)
@@ -400,8 +448,9 @@ function M.Panel(props: PanelProps): Node
 					tip = `{name} {col}`,
 					leading = ui.div { w = 14, h = 14, shrink = 0, pop },
 					value = function(): string
-						local c = Picker.parse(value() or "")
-						return if c then string.upper(string.sub(Picker.hex({ r = c.r, g = c.g, b = c.b, a = 1 }), 2, 7)) else (value() or "")
+						local v = shown()
+						local c = Picker.parse(v or "")
+						return if c then string.upper(string.sub(Picker.hex({ r = c.r, g = c.g, b = c.b, a = 1 }), 2, 7)) else (v or "")
 					end,
 					commit = function(t: string)
 						local h = Picker.parse("#" .. string.gsub(t, "[#%s]", ""))

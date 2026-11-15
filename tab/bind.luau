@@ -37,6 +37,8 @@ local function pop(L: any, open: any, label: string, anchor: Node, o: { vars: { 
 	return ui.popover {
 		open = open,
 		autofocus = false,
+		-- (S7) focus back to the Canvas as it closes (pointer.luau)
+		focus_home = true,
 		label = label,
 		placement = { side = "left", align = "start", offset = 18 },
 		anchor = anchor,

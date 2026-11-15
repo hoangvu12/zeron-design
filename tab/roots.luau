@@ -29,6 +29,12 @@ function M.new(key: string?): Roots
 	local items = if key then ui.state(key, {} :: { any }) else ui.use_state({} :: { any })
 	-- (A named state outlives a reload; the roots it named don't.)
 	items:set({})
+	-- (D3) What `get` follows: bumped by a root's write, not by `live`. A drag
+	-- (or a colour picker's knob) writes `live` at every move, and only the
+	-- board's `each` (over `items`) draws it; everything else reading the
+	-- roots (the panel's node, Layers, Components, the noodles…) ran again
+	-- at every move, 30-38 ms a move on Workbook Studio.
+	local revs = if key then ui.state(key .. ".rev", 0) else ui.use_state(0)
 	local by: { [string]: any } = {}
 	local list: { any } = {}
 	local k = 0
@@ -40,7 +46,7 @@ function M.new(key: string?): Roots
 	end
 
 	function self.get(_s: any): { any }
-		local _ = items:get()
+		local _ = revs:get()
 		return list
 	end
 	function self.peek(_s: any): { any }
@@ -56,6 +62,7 @@ function M.new(key: string?): Roots
 		end
 		self.rev += 1
 		items:set(light)
+		revs:set(revs:peek() + 1)
 	end
 	function self.set_key(_s: any, i: number, root: any)
 		local old = list[i]
@@ -67,6 +74,7 @@ function M.new(key: string?): Roots
 		by[root.id] = root
 		self.rev += 1
 		items:set_key(i, item_of(root))
+		revs:set(revs:peek() + 1)
 	end
 	function self.set_live(_s: any, i: number, live: any)
 		if list[i] then

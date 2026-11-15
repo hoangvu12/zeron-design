@@ -23,9 +23,11 @@ local Webfonts = require("./engine/webfonts")
 local Handoff = require("./engine/handoff")
 local Proto = require("./engine/proto")
 local Sim = require("./engine/sim")
+local Comments = require("./engine/comments")
 
 Boot.fonts(zeron)
 Designs.init(zeron)
+Comments.init(zeron)
 Icons.init(zeron)
 Images.init(zeron)
 Webfonts.init(zeron)
@@ -304,6 +306,7 @@ end)
 serve("delete", function(args)
 	local did = did_of(args)
 	Designs.delete(did)
+	pcall(Comments.forget, did) -- (step 7: its local comments go with it)
 	-- (`deleted`: tabs showing it say so, tab/service_source.luau.)
 	emit("designs", { deleted = did })
 	return {}
@@ -335,6 +338,20 @@ serve("tree", function(args)
 	local d = held(did_of(args))
 	local nodes = {}
 	local r = Resolve.new(d.doc, d.view_theme)
+	-- (GIF layers) `gif`: an image fill that's a GIF (Layers' badge)
+	local links = Images.links(d.did)
+	local function gif_of(n: any): boolean
+		for _, p in U.list(n.fill) do
+			if type(p) == "table" and p.type == "image" and type(p.url) == "string" and p.enabled ~= false then
+				local u = p.url
+				local l = string.lower(u)
+				if links[Images.GIF .. u] or (not links[u] and (string.match(l, "%.gif$") or string.match(l, "%.gif[%?#]"))) then
+					return true
+				end
+			end
+		end
+		return false
+	end
 	local function walk(list, parent, depth, inside)
 		for _, n in U.list(list) do
 			if type(n) == "table" then
@@ -347,6 +364,9 @@ serve("tree", function(args)
 				local lay = n.layout
 				if Proto.has(n) then
 					item.proto = true
+				end
+				if n.fill ~= nil and gif_of(n) then
+					item.gif = true
 				end
 				table.insert(nodes, item)
 				if n.type == "instance" and not inside then
@@ -546,6 +566,21 @@ serve("images_missing", function(args)
 	local d = held(did_of(args))
 	return { urls = Images.missing(d.doc, Images.links(d.did)) }
 end, true)
+
+-- (step 7) Local comments (engine/comments.luau): a Design's pins with their
+-- replies; one action at a time ("comment"), then a `comments` event.
+serve("comments", function(args)
+	local d = held(did_of(args))
+	return { did = d.did, comments = Comments.list(d.did) }
+end, true)
+
+serve("comment", function(args)
+	local d = held(did_of(args))
+	local who = { author = if type(args.author) == "string" and args.author ~= "" then args.author else "You", chat = args.chat }
+	local r = Comments.run(d.did, args, who)
+	emit("comments", { did = d.did, by = "person", action = args.action, id = r.id or args.id })
+	return r
+end) -- (one change to a Design's comments at a time: `exclusive`)
 
 serve("clipboard", function()
 	return { clip = Ops.clipboard }
@@ -921,6 +956,12 @@ local function write_exports(d: any, entries: { any }, cwd: string?, result: any
 		now = os.time,
 		json = zeron.json.encode,
 		icons = Agent.icons,
+		-- (f7 share) a picture's bytes for the shared page: { mime, base64 }
+		image = function(url: string): any?
+			local links = Images.links(d.did)
+			local key = links[url]
+			return if type(key) == "string" then Images.get((string.gsub(key, "^img:", ""))) else nil
+		end,
 	})
 	-- `inline = true`: the PNGs (and HTML) in the result as well.
 	local inline_ids, inline_html = {}, {}
@@ -1022,8 +1063,25 @@ zeron.tool({
 		seen = Designs.kv_get(seen_key)
 		before = d.version
 		emit("working", { did = d.did, chat = chat, on = true, label = description })
-		ok, result, committed, draft, flash = pcall(Agent.execute, zeron, d, snippet, description, chat, { verbose = args.verbose == true })
+		-- (step 7) the Design's comments, for GetComments / ResolveComment
+		local cok, clist = pcall(Comments.list, d.did)
+		ok, result, committed, draft, flash = pcall(Agent.execute, zeron, d, snippet, description, chat, { verbose = args.verbose == true, comments = if cok then clist else {} })
 		emit("working", { did = d.did, chat = chat, on = false })
+		-- (step 7) what the snippet did to comments, once it ran through:
+		-- written whether or not the Design changed
+		if ok and draft and type(result) == "table" and not result.error and draft.comment_ops and #draft.comment_ops > 0 then
+			local done_n, notes = 0, {}
+			for _, a in draft.comment_ops do
+				local fine, e = pcall(Comments.run, d.did, a, { author = "Agent", chat = chat })
+				if fine then
+					done_n += 1
+				else
+					table.insert(notes, `{a.action} {tostring(a.id)}: {tostring(e)}`)
+				end
+			end
+			result.comments = { done = done_n, failed = if #notes > 0 then notes else nil }
+			emit("comments", { did = d.did, by = "agent", chat = chat })
+		end
 		if not ok then
 			Designs.rollback(d)
 			local msg = if type(result) == "table" and result.draft_error then result.draft_error else tostring(result)
@@ -1110,7 +1168,7 @@ zeron.tool({
 					table.insert(exports, e)
 				elseif e.format == "png" then
 					table.insert(shots, { id = e.id, scale = e.scale })
-				elseif e.format == "handoff" then
+				elseif e.format == "handoff" or e.format == "share" then
 					result.exported = result.exported or {}
 					result.exported.notes = { "this Zeron can't write files yet (it needs \"files.write\"): nothing was written. Export the Screens as png and html instead; they come back in the result" }
 				end
@@ -1146,7 +1204,18 @@ zeron.tool({
 			if Designs.exists(did) then
 				local d = held(did)
 				local sel = Designs.kv_get("sel:" .. did) or {}
-				table.insert(open, { did = did, name = d.name, version = d.version, selection = sel.ids or {} })
+				-- (step 7) the open comments the person left in Play
+				local cok, clist = pcall(Comments.list, did)
+				local open_c = if cok then Comments.for_agents(clist, d.doc, false) else {}
+				local entry: any = { did = did, name = d.name, version = d.version, selection = sel.ids or {} }
+				if #open_c > 0 then
+					local MAX = 30
+					entry.comments = table.move(open_c, 1, math.min(#open_c, MAX), 1, {})
+					if #open_c > MAX then
+						entry.comments_more = `{#open_c - MAX} more open comments: read them all with GetComments() in design_execute`
+					end
+				end
+				table.insert(open, entry)
 			end
 		end
 		local recent = {}
@@ -1155,7 +1224,14 @@ zeron.tool({
 				break
 			end
 			local sel = Designs.kv_get("sel:" .. r.did) or {}
-			table.insert(recent, { did = r.did, name = r.name, version = r.version, selection = if sel.ids and #sel.ids > 0 then sel.ids else nil })
+			local cok, clist = pcall(Comments.list, r.did)
+			local open_n = 0
+			for _, t in (if cok then clist else {}) do
+				if not t.resolved then
+					open_n += 1
+				end
+			end
+			table.insert(recent, { did = r.did, name = r.name, version = r.version, selection = if sel.ids and #sel.ids > 0 then sel.ids else nil, openComments = if open_n > 0 then open_n else nil })
 		end
 		return Guide.first(chat, { open = open, recent = recent })
 	end,

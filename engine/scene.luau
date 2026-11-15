@@ -86,7 +86,13 @@ local function paint(v: any, images: any?): any
 		if mode ~= "contain" and mode ~= "stretch" then
 			mode = "cover"
 		end
-		return { k = "image", src = src, mode = mode, op = op }
+		-- (GIF layers, pure/anim/f7/gif: Play plays a `gif` paint; the board
+		-- shows its first frame. Known from the stored picture's type, or a
+		-- web url's `.gif`; "\0gif\0" is engine/images.luau's M.GIF.)
+		local gif = (images and images["\0gif\0" .. url] == true)
+			or (string.sub(src, 1, 4) ~= "img:" and string.match(string.lower(url), "%.gif$") ~= nil)
+			or (string.sub(src, 1, 4) ~= "img:" and string.match(string.lower(url), "%.gif[%?#]") ~= nil)
+		return { k = "image", src = src, mode = mode, op = op, gif = if gif then true else nil }
 	end
 	return nil
 end

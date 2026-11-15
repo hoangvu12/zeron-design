@@ -472,6 +472,76 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		set_live(per)
 	end
 
+	-- (D5) After a drop, what the drag showed (its boxes: the selection's
+	-- outline and handles, the size pill, a Screen's name) stays until the
+	-- service's new scene for those roots lands, as the layer itself does
+	-- (`live`, `lifted`). Cleared at the release, the outline went back to
+	-- where the layer had been for the frames before the answer, then jumped.
+	local held: { [string]: number }? = nil -- root id -> its v at the drop
+	local held_seq = 0
+	local function unhold()
+		if held then
+			held = nil
+			local sh = shown:peek()
+			if sh and sh.kind == "held" then
+				shown:set(nil)
+			end
+		end
+	end
+	local function hold_shown(sh: any)
+		held = nil
+		if not (sh and sh.boxes) then
+			return
+		end
+		local i = ix:peek()
+		local list = roots:peek()
+		local h: { [string]: number } = {}
+		for id in sh.boxes do
+			local n = i.by[id]
+			local r = n and list[n.root]
+			if r then
+				h[r.id] = r.v or 0
+			end
+		end
+		if next(h) == nil then
+			return
+		end
+		held = h
+		held_seq += 1
+		local seq = held_seq
+		shown:set({ kind = "held", boxes = sh.boxes, ids = sh.ids })
+		-- (An answer that never comes: let go after a while.)
+		ui.after(3000, function()
+			if held_seq == seq then
+				unhold()
+			end
+		end)
+	end
+	ui.effect(function()
+		local list = roots:get()
+		if not held then
+			return
+		end
+		local seen = 0
+		for _, r in list do
+			local v = held[r.id]
+			if v ~= nil then
+				seen += 1
+				if r.v ~= v then
+					unhold()
+					return
+				end
+			end
+		end
+		local want = 0
+		for _ in held do
+			want += 1
+		end
+		if seen < want then
+			unhold() -- a root gone: answered too
+		end
+	end)
+
 	-- Edits -------------------------------------------------------------------------------
 	local drop_lifted_ref: () -> () = function() end
 	local canvas_el: any = nil
@@ -479,6 +549,7 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		if #ops == 0 then
 			clear_live()
 			drop_lifted_ref()
+			unhold()
 			return
 		end
 		local o = opts or {}
@@ -487,6 +558,7 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			if not ok then
 				clear_live()
 				drop_lifted_ref()
+				unhold()
 			end
 			if done then
 				done(ok, res)
@@ -627,15 +699,116 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		end
 		set_live(per)
 	end
-	local function start_editing(id: string)
+	-- A text just drawn or inserted, waiting to be edited (D2): the service
+	-- answers the edit before the scene with the new layer comes, so the
+	-- editor can't open yet. Meanwhile the keys typed are its words, not the
+	-- Canvas's shortcuts (a letter picked a tool, Shift+Space opened the
+	-- Preview, Backspace deleted the new text): kept in `typed` and put in
+	-- the editor as it opens. `id` is nil until the edit answers.
+	local awaiting: { id: string?, typed: string, seq: number }? = nil
+	local await_seq = 0
+	local caret_at_end = false -- (the editor opens on typed words: caret after them)
+	local function start_editing(id: string, typed: string?)
 		local n = ix:peek().by[id]
 		if not n or not n.it.text then
 			return
 		end
 		local content = n.it.text.s or ""
 		typed_once = false
+		local seeded = typed ~= nil and typed ~= ""
+		if seeded then
+			content = typed :: string
+		end
+		caret_at_end = seeded -- (read by the field as it mounts, inside the set below)
 		select({ id })
 		editing:set({ id = id, content = content, anchor = #content, focus = #content })
+		if seeded then
+			text_live(id, content)
+			queue_text(id, content, false)
+			typed_once = true
+		end
+	end
+	-- From a text tool's press: keys wait for the editor (above).
+	local function await_text()
+		await_seq += 1
+		local w: any = { id = nil, typed = "", seq = await_seq }
+		awaiting = w
+		-- (an edit that failed or never answers: the keys are the Canvas's again)
+		ui.after(3000, function()
+			if awaiting == w and w.id == nil then
+				awaiting = nil
+			end
+		end)
+	end
+	-- The new text's id known (its edit answered): open the editor once its
+	-- layer is in the scene, for up to 3 s; a selection that moves on, or
+	-- another text waited for, lets it go.
+	local function edit_when_in(id: string)
+		local a = awaiting
+		if not a then
+			await_text()
+			a = awaiting
+		end
+		local w = a :: any
+		w.id = id
+		local t0 = ui.now()
+		-- (A selection of a layer not in the scene yet reads as none: empty
+		-- is still this text's.)
+		local function moved_on(): boolean
+			local s = sel()
+			return #s > 0 and not (#s == 1 and s[1] == id)
+		end
+		local function try()
+			if awaiting ~= w then
+				return
+			end
+			if moved_on() then
+				awaiting = nil
+				return
+			end
+			if ix:peek().by[id] then
+				awaiting = nil
+				start_editing(id, w.typed)
+				return
+			end
+			if ui.now() - t0 > 3000 then
+				awaiting = nil
+				return
+			end
+			ui.after(30, try)
+		end
+		try()
+	end
+	-- A key while waiting: a character, Space or Backspace is the text's.
+	local function await_key(k: any): boolean
+		local a = awaiting
+		if not a or k.cmd or k.alt then
+			return false
+		end
+		local key = k.key
+		if key == "Escape" then
+			awaiting = nil
+			return false
+		end
+		if key == "Backspace" then
+			local n = utf8.len(a.typed)
+			if n and n > 0 then
+				a.typed = string.sub(a.typed, 1, (utf8.offset(a.typed, n) :: number) - 1)
+			end
+			return true
+		end
+		if key == "Space" then
+			key = " "
+		end
+		if type(key) == "string" and utf8.len(key) == 1 and string.byte(key) >= 32 then
+			-- (a key event may name the letter, not the character: Shift+h)
+			if k.shift and string.match(key, "^%l$") then
+				key = string.upper(key)
+			end
+			a.typed ..= key
+			return true
+		end
+		return false
 	end
 	local function finish_editing()
 		local e = editing:peek()
@@ -651,6 +824,52 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 	end
 
 	-- Pointer ---------------------------------------------------------------------------
+	-- Lifted: each subtree drawn on its own canvas over the board; its Screen
+	-- leaves it out (one draw of that Screen now, and one when the answer
+	-- comes). A move translates the lifted canvas's view; a resize (D6)
+	-- redraws the lifted item alone each frame, so the board's tiles change
+	-- only at the press and the drop (zgx before D1's tile fix tore a board
+	-- whose drawing changed every frame). `clips`: keep the clipping
+	-- ancestors' clips (a resize stays where its Screen shows it; a move
+	-- shows all of what's dragged, as ever).
+	local function lift_item(i: any, list: { any }, id: string, clips: boolean): (any?, number?)
+		local n = i.by[id]
+		local root = n and list[n.root]
+		if not root then
+			return nil, nil
+		end
+		local slice = table.move(root.nodes, n.at, n.at + (n.it.n or 0), 1, {})
+		local op0 = 1
+		local cl: { any }? = if clips then {} else nil
+		local p = i.by[n.parent]
+		while p do
+			op0 *= p.it.op or 1
+			if cl and p.it.clip then
+				table.insert(cl, 1, p.it)
+			end
+			p = i.by[p.parent]
+		end
+		return { id = id, root = root.id, src_v = root.v, nodes = slice, op0 = op0, clips = cl, live = false }, n.root
+	end
+	local function lift(d: Drag, ids: { string }, clips: boolean)
+		local i = ix:peek()
+		local list = roots:peek()
+		local items = {}
+		local hide: { [number]: any } = {}
+		for _, id in ids do
+			local item, ri = lift_item(i, list, id, clips)
+			if item and ri then
+				table.insert(items, item)
+				local h = hide[ri] or { hide = {} }
+				h.hide[id] = true
+				hide[ri] = h
+			end
+		end
+		set_live(hide)
+		lifted:set(items)
+		d.lifted = true
+	end
+
 	local function begin_move(d: Drag)
 		local i = ix:peek()
 		local ids = Model.topmost(i, sel())
@@ -679,30 +898,7 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		end
 		d.dup = d.alt
 		d.dx, d.dy = 0, 0
-		-- Lifted: each subtree drawn on its own; its Screen leaves it out
-		-- (one draw of that Screen now, and one when the answer comes).
-		local list = roots:peek()
-		local items = {}
-		local hide: { [number]: any } = {}
-		for _, id in ids do
-			local n = i.by[id]
-			local root = list[n.root]
-			local count = (n.it.n or 0)
-			local slice = table.move(root.nodes, n.at, n.at + count, 1, {})
-			local op0 = 1
-			local p = i.by[n.parent]
-			while p do
-				op0 *= p.it.op or 1
-				p = i.by[p.parent]
-			end
-			table.insert(items, { id = id, root = root.id, src_v = root.v, nodes = slice, op0 = op0, live = false })
-			local h = hide[n.root] or { hide = {} }
-			h.hide[id] = true
-			hide[n.root] = h
-		end
-		set_live(hide)
-		lifted:set(items)
-		d.lifted = true
+		lift(d, ids, false)
 	end
 
 	-- The innermost frame under (x, y) that doesn't move; "" is the Canvas.
@@ -950,10 +1146,17 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			end
 		end
 		d.results = results
-		live_for(d.ids, function(id: string): (any?, any?)
-			local r = results[id]
-			return r.map, { w = r.w, h = r.h }
-		end)
+		-- (D6) Drawn lifted, over the board: the board doesn't change while
+		-- the size does. Each lifted item gets its live map and box.
+		if not d.lifted then
+			lift(d, d.ids, true)
+		end
+		for k, item in lifted:peek() do
+			local r = results[item.id]
+			if r then
+				lifted:set_key({ k, "live" }, { maps = { [item.id] = r.map }, boxes = { [item.id] = { w = r.w, h = r.h } } })
+			end
+		end
 		if up and d.T then
 			guides = Model.guides_for(nb, d.T, v.zoom)
 			guides.gaps = {}
@@ -1065,6 +1268,61 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		shown:set({ kind = "marquee", rect = r })
 	end
 
+	-- (D6) Once answered, the board draws the layer again, but on zgx
+	-- before D1's tile fix its new tiles land a frame or more later: dropped
+	-- at once, the layer was missing for that frame (the drop flashed). So
+	-- it stays a little longer, drawn from the answer (where the board will
+	-- draw it, same pixels), when a second copy over the board can't look
+	-- different: opaque all through, no shadows.
+	local SETTLE_MS = 150
+	local settle_seq = 0
+	local function opaque(nodes: { any }, op0: number): boolean
+		if op0 ~= 1 then
+			return false
+		end
+		local function solid(paints: any): boolean
+			for _, f in paints or {} do
+				local c = f.color
+				if f.k ~= "solid" or type(c) ~= "string" or (#c == 9 and string.lower(string.sub(c, 8)) ~= "ff") then
+					return false
+				end
+			end
+			return true
+		end
+		for _, it in nodes do
+			if (it.op or 1) ~= 1 or it.fx or it.hidden or not solid(it.fill) or (it.stroke and not solid(it.stroke.fill)) then
+				return false
+			end
+		end
+		return true
+	end
+	local function settle(items: { any }): boolean
+		if items[1].after then
+			return false
+		end
+		local i = ix:peek()
+		local list = roots:peek()
+		local out = {}
+		for _, item in items do
+			local it2 = lift_item(i, list, item.id, true)
+			if not it2 or not opaque(it2.nodes, it2.op0) then
+				return false
+			end
+			it2.after = true
+			table.insert(out, it2)
+		end
+		settle_seq += 1
+		local seq = settle_seq
+		lift_offset:set({ dx = 0, dy = 0 })
+		lifted:set(out)
+		ui.after(SETTLE_MS, function()
+			local now = lifted:peek()
+			if settle_seq == seq and now[1] and now[1].after then
+				lifted:set({})
+			end
+		end)
+		return true
+	end
 	-- The lifted layer goes once every Screen it came from has been answered
 	-- (a newer `v`), or at once when nothing was sent.
 	ui.effect(function()
@@ -1083,6 +1341,9 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			if still and not item.done then
 				return
 			end
+		end
+		if settle(items) then
+			return
 		end
 		lifted:set({})
 		lift_offset:set({ dx = 0, dy = 0 })
@@ -1145,10 +1406,11 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			return
 		end
 		local node = make_node(t, w, h)
+		if t == "text" then
+			await_text()
+		end
 		insert(node, d.parent or "", round(x), round(y), "Draw " .. t, if t == "text" then function(ids: { string })
-			ui.after(0, function()
-				start_editing(ids[1])
-			end)
+			edit_when_in(ids[1])
 		end else nil)
 	end
 	-- The pen's points as a path (closed, or open).
@@ -1265,6 +1527,9 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		if props.log then
 			props.log(`drop {d.kind} moved={d.moved} dx={d.dx} dy={d.dy} ids={if d.ids then #d.ids else 0} target={d.target} index={d.index}`)
 		end
+		-- (What the drag showed: a move, resize or rotate that sends an edit
+		-- keeps its boxes shown until the answer, `hold_shown`.)
+		local sh0 = shown:peek()
 		shown:set(nil)
 		cursor:set(if space then "grab" else "default")
 		if cancel then
@@ -1343,6 +1608,7 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 					end
 				end
 			end
+			hold_shown(sh0)
 			send(ops, label)
 		elseif d.kind == "resize" and d.moved and d.results then
 			local ops = {}
@@ -1356,6 +1622,7 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 					table.insert(ops, { op = "resize", id = id, w = r.w, h = r.h })
 				end
 			end
+			hold_shown(sh0)
 			send(ops, "Resize")
 		elseif d.kind == "rotate" and d.moved and d.rotation ~= nil then
 			local id = d.ids[1]
@@ -1377,6 +1644,7 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 				local bx, by = Draw.apply(pinv, nx, ny)
 				table.insert(ops, { op = "move", id = id, dx = round((bx - ax) * 100) / 100, dy = round((by - ay) * 100) / 100 })
 			end
+			hold_shown(sh0)
 			send(ops, "Rotate")
 		else
 			clear_live()
@@ -1579,6 +1847,8 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		if not v then
 			return
 		end
+		-- (D2) a press elsewhere lets a drawn text's wait for its editor go
+		awaiting = nil
 		do
 			local moving = tool:peek() == "move" and not space and not editing:peek()
 			-- A noodle under the pointer (Prototype tab): a click selects it
@@ -1954,6 +2224,10 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 	local function on_key(k: any): boolean?
 		if k.editing then
 			return nil
+		end
+		-- (D2) a text drawn and not open yet: its words, not shortcuts
+		if await_key(k) then
+			return true
 		end
 		local key = k.key
 		local s = sel()
@@ -2682,6 +2956,9 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			hover = hover,
 			tool = tool,
 			index = ix,
+			-- What the overlay shows of a drag (its live boxes, snapped): for
+			-- films that check each frame's picture (pure/tests/board_tiles.py).
+			shown = shown,
 			select = select,
 			render_png = render_png,
 			render_layer = render_layer,
@@ -2716,6 +2993,11 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			-- panel's button holding focus), as pen's work wherever focus is.
 			key = function(k: any): boolean?
 				return on_key(k)
+			end,
+			-- (D2) a key typed while a drawn text waits for its editor: the
+			-- text's (true), before the shell's own keys take it
+			await_key = function(k: any): boolean
+				return not k.editing and await_key(k)
 			end,
 			-- (F6 C3) for the shell's Paste items: interactions when they were
 			-- copied last (true), else nothing done (false)
@@ -2992,8 +3274,7 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 				end
 				local t0 = os.clock()
 				Draw.draw_root(c, root, item.live or false)
-				note(perf.items, (os.clock() - t0) * 1000)
-			end,
+				note(perf.items, (os.clock() - t0) * 1000)			end,
 		},
 		-- What a move drags, over the board.
 		ui.canvas {
@@ -3015,7 +3296,19 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			each = lifted,
 			draw_item = function(c: Canvas, item: any)
 				local t0 = os.clock()
+				-- (A resized layer stays inside what clips it.)
+				local n = 0
+				for _, it in item.clips or {} do
+					local path = Draw.shape_path(it, Draw.local_map(it), 0)
+					if path then
+						c:clip(path)
+						n += 1
+					end
+				end
 				Draw.draw_root(c, item)
+				for _ = 1, n do
+					c:restore()
+				end
 				note(perf.items, (os.clock() - t0) * 1000)
 			end,
 		},
@@ -3121,7 +3414,14 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 				end,
 				on_mount = function(el: any)
 					el:focus()
-					el:select_all()
+					if caret_at_end then
+						-- (opened on words typed while it waited: go on after them)
+						caret_at_end = false
+						local e = editing:peek()
+						el:set_selection_bytes(if e then #e.content else 0)
+					else
+						el:select_all()
+					end
 				end,
 				wrap = false,
 				pointer_events = "none",
