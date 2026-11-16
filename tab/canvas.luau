@@ -3173,6 +3173,13 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 					fit_rect(n.bounds, 1)
 				end
 			end,
+			-- (N8) Fit layer `id` itself, at most 100% (the Variations bar's name).
+			zoom_to_node = function(id: string)
+				local n = ix:peek().by[id]
+				if n then
+					fit_rect(n.bounds, 1)
+				end
+			end,
 			-- The Canvas's keys, for keys pressed elsewhere in the editor (a
 			-- panel's button holding focus), as pen's work wherever focus is.
 			key = function(k: any): boolean?

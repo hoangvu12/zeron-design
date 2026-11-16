@@ -2772,7 +2772,8 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 				return left_tab:get() ~= "comments"
 			end,
 		} else ui.div {},
-		-- (N2) the Variations bar under a node an agent made versions of
+		-- (N2) the Variations bar for a node an agent made versions of (N8: at
+		-- the board's bottom centre, the node outlined)
 		if (source :: any).variations then VariationsBar.Layer {
 			id = `design-{props.id}`,
 			sets = (source :: any).variations,
@@ -2785,6 +2786,13 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			size = function(): any
 				return { w = width:get(), h = pre.hgt:get() }
 			end,
+			-- (N8) the board between the panels: the bar sits at its bottom centre
+			board = function(): any
+				return {
+					l = if left_open:get() then PANEL_X + left_w:get() + I else PANEL_X,
+					r = (if props_shown:get() then E + RW + I else 0) + (if pre.on:get() then (pre.wh()) + I + (if props_shown:get() then 0 else E) else 0),
+				}
+			end,
 			hidden = function(): boolean
 				return playing:get() ~= nil
 			end,
@@ -2793,6 +2801,11 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			end,
 			edit = function(ops: { any }, label: string)
 				source.edit(ops, label)
+			end,
+			zoom_to = function(id: string)
+				if api and api.zoom_to_node then
+					api.zoom_to_node(id)
+				end
 			end,
 		} else ui.div {},
 		},

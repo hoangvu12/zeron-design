@@ -1,18 +1,23 @@
 --!nonstrict
 -- The hand cursor on clickable controls (zgx's ui is read-only: see pointer.luau).
 local ui = require("./pointer").ui
--- (N2) The Variations bar (pure/anim/n2/README.md): under a node an agent
--- made versions of, on the board: "2 of 5 · Tighter hierarchy  ‹ ›  Use this ×".
+-- (N2) The Variations bar (pure/anim/n2/README.md) for a node an agent made
+-- versions of: "2 of 5 · Tighter hierarchy  ‹ ›  Use this ×".
 -- ‹ › (or ← → while the bar has focus) shows another version in the node's
 -- place (no undo step); Use this keeps the shown one and drops the others
 -- (one undo step; Enter too); × goes back to the original (one undo step).
 -- The versions live in the service (engine/variations.luau); the bar sends
 -- `variation` ops.
+-- (N8) It sits at one spot, the bottom centre of the board (as Gui's bar),
+-- never over the Screen's content; the node it's for has a thin outline,
+-- and clicking the bar's name zooms to it. With several sets, the bar is
+-- for the one most in view.
 --
 --   VariationsBar.Layer { id, sets = State<{ [id] = { current, count,
 --     names, original } }>, ix = () -> index?, view = () -> {x,y,zoom}?,
---     size = () -> {w,h}, hidden = () -> boolean, dark = () -> boolean,
---     edit = (ops, label) -> () }
+--     size = () -> {w,h}, board = () -> { l, r } (the board's left and right
+--     insets), hidden = () -> boolean, dark = () -> boolean,
+--     edit = (ops, label) -> (), zoom_to = (id) -> () }
 
 local Kit = require("./kit")
 local Look = require("./look")
@@ -20,8 +25,7 @@ local Look = require("./look")
 local M = {}
 
 M.H = 32 -- the bar's height
-M.W_EST = 380 -- its width at most, for keeping it on screen
-M.GAP = 36 -- under the node (below the selection's W×H pill)
+M.BOTTOM = Look.EDGE -- from the window's bottom (the zoom pill's line)
 
 -- "2 of 5 · Tighter hierarchy"
 function M.label(s: any): string
@@ -38,53 +42,66 @@ function M.step(s: any, d: number): number
 	return ((s.current - 1 + d) % n) + 1
 end
 
--- Where a set's bar goes: under the node's box, kept on screen; nil when
--- the node is off screen (or not drawn). `b` = { x, y, w, h } in the Design.
-function M.place(b: { number }, v: any, s: any): { number }?
+-- The node's box in tab points and how much of it is in the window (area).
+function M.on_screen(b: { number }, v: any, s: any): ({ number }, number)
 	local x, y = v.x + b[1] * v.zoom, v.y + b[2] * v.zoom
 	local w, h = b[3] * v.zoom, b[4] * v.zoom
-	if x + w < 0 or y + h < 0 or x > s.w or y > s.h then
-		return nil
+	local iw = math.max(0, math.min(x + w, s.w) - math.max(x, 0))
+	local ih = math.max(0, math.min(y + h, s.h) - math.max(y, 0))
+	return { x, y, w, h }, iw * ih
+end
+
+-- Which set the bar is for: the one whose node is most in view; else (none
+-- in view) the first. `sets` keyed by node id. → id?, its box (nil if off
+-- screen or not drawn), how many sets.
+function M.pick(sets: any, i: any, v: any, s: any): (string?, { number }?, number)
+	local ids = {}
+	for id in sets do
+		table.insert(ids, id)
 	end
-	local bx = math.clamp(x, 8, math.max(8, s.w - M.W_EST - 8))
-	local by = y + h + M.GAP
-	-- (a node running past the bottom: the bar sits at the bottom, over it)
-	by = math.clamp(by, 8, math.max(8, s.h - M.H - 14))
-	return { math.floor(bx), math.floor(by) }
+	table.sort(ids)
+	local best, best_box, best_area = nil, nil, 0
+	for _, id in ids do
+		local n = i and i.by[id]
+		if n and v then
+			local box, area = M.on_screen(n.bounds, v, s)
+			if area > best_area then
+				best, best_box, best_area = id, box, area
+			end
+		end
+	end
+	if not best then
+		return ids[1], nil, #ids
+	end
+	return best, best_box, #ids
 end
 
 -- Mounted by the shell over the Canvas (as the comment pins: inside the
 -- Canvas, the board keeps the pointer from press to release and a button
--- there never gets its click). `view`, `ix`, `size` and `hidden` are
--- functions (the Canvas's api comes after the shell is built).
+-- there never gets its click). `view`, `ix`, `size`, `board` and `hidden`
+-- are functions (the Canvas's api comes after the shell is built).
 function M.Layer(o: any): Node
 	local function L(): any
 		return Look.of(o.dark())
 	end
-	-- the bars on screen: { list = { id }, at = { [id] = { x, y } } }
+	-- the bar's set: { list = { id } (0 or 1), box = its node's box?, count }
 	local shown = ui.computed(function(): any
 		local sets = o.sets:get() or {}
-		local list, at = {}, {}
 		if next(sets) == nil or (o.hidden and o.hidden()) then
-			return { list = list, at = at }
+			return { list = {}, count = 0 }
 		end
 		local v = o.view()
 		local s = o.size()
 		local i = o.ix()
-		if not v or not i then
-			return { list = list, at = at }
+		if not i then
+			return { list = {}, count = 0 }
 		end
-		for id in sets do
-			local n = i.by[id]
-			local p = if n then M.place(n.bounds, v, s) else nil
-			if p then
-				table.insert(list, id)
-				at[id] = p
-			end
-		end
-		table.sort(list)
-		return { list = list, at = at }
+		local id, box, count = M.pick(sets, i, v, s)
+		return { list = if id then { id } else {}, box = box, count = count }
 	end)
+	local function board(): any
+		return if o.board then o.board() else { l = 0, r = 0 }
+	end
 
 	local function flip(id: string, to: number)
 		local all = table.clone(o.sets:peek() or {})
@@ -115,11 +132,9 @@ function M.Layer(o: any): Node
 
 	local function bar(id: string): Node
 		local P = `{o.id}-variations-{id}`
+		local row_el: any = nil
 		local function set(): any
 			return (o.sets:get() or {})[id]
-		end
-		local function at(): { number }
-			return shown:get().at[id] or { -1000, -1000 }
 		end
 		local function arrow(icon: string, label: string, d: number): Node
 			return ui.button {
@@ -152,14 +167,12 @@ function M.Layer(o: any): Node
 			id = P,
 			role = "toolbar",
 			label = "Variations",
-			absolute = true,
-			left = function(): number
-				return at()[1]
-			end,
-			top = function(): number
-				return at()[2]
+			on_mount = function(el: any)
+				row_el = el
 			end,
 			h = M.H,
+			max_w = 520,
+			shrink = 1,
 			pl = 10,
 			pr = 4,
 			gap = 2,
@@ -194,25 +207,66 @@ function M.Layer(o: any): Node
 				end
 				return nil
 			end,
-			ui.div { color = function(): string
-				return L().agent
-			end, shrink = 0, mr = 6, Kit.icon("sparkles", 13) },
-			ui.text {
-				function(): string
-					return M.label(set())
+			-- (N8) the name: a click zooms to the node (the bar keeps focus for ← →)
+			ui.button {
+				id = `{P}-name`,
+				label = "Show the layer with these versions",
+				h = 24,
+				pl = 0,
+				pr = 6,
+				ml = -4,
+				gap = 6,
+				rounded = 6,
+				border = 0,
+				items = "center",
+				direction = "row",
+				bg = "#00000000",
+				hover = { bg = L().hover },
+				focus = { outline = 0 },
+				tooltip = Kit.tip(L(), "Zoom to this layer"),
+				on_click = function()
+					if o.zoom_to then
+						o.zoom_to(id)
+					end
+					if row_el then
+						pcall(function()
+							row_el:focus()
+						end)
+					end
 				end,
-				id = `{P}-label`,
-				literal = true,
-				text_size = 12,
-				weight = 500,
-				font = Look.UI,
-				color = function(): string
-					return L().fg
-				end,
-				truncate = true,
-				max_w = 220,
-				shrink = 0,
-				mr = 4,
+				ui.div { color = function(): string
+					return L().agent
+				end, shrink = 0, pl = 4, Kit.icon("sparkles", 13) },
+				ui.text {
+					function(): string
+						return M.label(set())
+					end,
+					id = `{P}-label`,
+					literal = true,
+					text_size = 12,
+					weight = 500,
+					font = Look.UI,
+					color = function(): string
+						return L().fg
+					end,
+					truncate = true,
+					max_w = 220,
+					shrink = 0,
+				},
+				-- (several sets: which of them this is)
+				ui.text {
+					function(): string
+						local c = shown:get().count or 0
+						return if c > 1 then `· {c} sets` else ""
+					end,
+					literal = true,
+					text_size = 11,
+					font = Look.UI,
+					color = function(): string
+						return L().muted
+					end,
+					shrink = 0,
+				},
 			},
 			arrow("chevLeft", "Previous version", -1),
 			arrow("chevRight", "Next version", 1),
@@ -263,13 +317,64 @@ function M.Layer(o: any): Node
 		}
 	end
 
-	return ui.each(ui.computed(function(): { string }
-		return shown:get().list
-	end), bar, {
-		key = function(id: any): string
-			return id
+	-- the node's thin outline (on the board, under nothing that takes the pointer)
+	local function box(): { number }
+		return shown:get().box or { -1000, -1000, 1, 1 }
+	end
+	local outline = ui.div {
+		id = `{o.id}-variations-outline`,
+		absolute = true,
+		pointer_events = "none",
+		left = function(): number
+			return math.floor(box()[1]) - 2
 		end,
-	})
+		top = function(): number
+			return math.floor(box()[2]) - 2
+		end,
+		w = function(): number
+			return math.max(1, math.ceil(box()[3]) + 4)
+		end,
+		h = function(): number
+			return math.max(1, math.ceil(box()[4]) + 4)
+		end,
+		border = 1,
+		border_color = function(): string
+			return string.sub(L().agent, 1, 7) .. "8c"
+		end,
+		rounded = 4,
+	}
+	return ui.div {
+		absolute = true,
+		left = 0,
+		top = 0,
+		right = 0,
+		bottom = 0,
+		pointer_events = "none",
+		ui.show(function(): boolean
+			return shown:get().box ~= nil
+		end, outline),
+		-- the bar: bottom centre of the board (between the side panels)
+		ui.row {
+			absolute = true,
+			left = function(): number
+				return board().l
+			end,
+			right = function(): number
+				return board().r
+			end,
+			bottom = M.BOTTOM,
+			h = M.H,
+			justify = "center",
+			pointer_events = "none",
+			ui.each(ui.computed(function(): { string }
+				return shown:get().list
+			end), bar, {
+				key = function(id: any): string
+					return id
+				end,
+			}),
+		},
+	}
 end
 
 return M

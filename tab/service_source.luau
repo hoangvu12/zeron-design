@@ -27,7 +27,7 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 	ia_sel:set({ key = "", list = {} })
 	local flashes = ui.state(`design.{did}.flashes`, {} :: { any })
 	-- (N1) Agents' changes to animate on the overlay (canvas.luau's agent fx):
-	-- `{ { key, id, kind = "new"|"edit"|"delete"|"read", chat, at, box? } }`
+	-- `{ { key, id, kind = "new"|"edit"|"delete"|"read", chat, at, call?, box? } }`
 	-- (`box`, a deleted node's last canvas box). The Canvas drops each when done.
 	local agent_fx = ui.state(`design.{did}.agent_fx`, {} :: { any })
 	agent_fx:set({})
@@ -232,9 +232,10 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 			-- (N1) new and edited nodes animate as the board shows them
 			if f.fx and #f.fx > 0 then
 				local a = table.clone(agent_fx:peek())
+				-- (N8) `call`: one call's nodes reveal one after another (agent_fx_plan.luau)
 				for _, x in f.fx do
 					fx_n += 1
-					table.insert(a, { key = `{fx_n}`, id = x.id, kind = x.kind, chat = f.chat, at = now })
+					table.insert(a, { key = `{fx_n}`, id = x.id, kind = x.kind, chat = f.chat, at = now, call = reply.version })
 				end
 				agent_fx:set(a)
 			end

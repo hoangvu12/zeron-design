@@ -1,7 +1,7 @@
 {
   "id": "design-pure",
   "name": "Design (pure)",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Design screens with your agents on a Canvas beside the chat: pure Luau, no companion program. Agents use design_execute, design_state and design_guide.",
   "entry": "init.luau",
   "service": "service.luau",
@@ -137,11 +137,12 @@
       "gallery.luau": "2422d480ef395ade28ca0ad41ea14f036f0d49d0ee72e2a0469c451a27f8cb65",
       "init.luau": "246abc014cc2861538cbb1c944bf48672265f69ba3562c54e348d94ece7a6623",
       "service.luau": "12f8fb977b08f86a5abc12ad6f35b8d45fe3639e09da77726f0c2330fff842fc",
-      "tab/README.md": "7d95524f2de6f7cf2f2f4c529cb416c420d8f50f09f294f40ea9820638ce4d8b",
-      "tab/agent_fx.luau": "9ec974ca66b8bdc1f8a5aba3c236179528ba5fe86f909a30a5f6c7a7d3def15d",
+      "tab/README.md": "f4b0d9901850192bb9691092af92cb23305fedbd0fa6e1964f2fdb857dc8169c",
+      "tab/agent_fx.luau": "98b522f155803eb4e31323a0b028fc7f9fae392d890c3ec76b4b760d6bf2be3d",
+      "tab/agent_fx_plan.luau": "80e5a10cf98ac8a315ab35eee65f41a78ae68a0fe41669bbd570ec1d454d6165",
       "tab/assets.luau": "3b89e5ba72f54c359f44421ce62c19bcc5b6883fcee06ba46a23c22c87096262",
       "tab/bind.luau": "8969f2bab4ee2d0d1ce16d2553a20910d1f06fe0c5bedfdc0b1fb903f6d99b6c",
-      "tab/canvas.luau": "4f8725d6e83bce9a2816b174c1b89bc2fa320c700d1f46f4a837cb01d5b7ebf4",
+      "tab/canvas.luau": "dd200f8b14fc612b1d37c95813c53697171ebf075d02f80fcda6c5d47d26f705",
       "tab/comments.luau": "f4c23bb38396ce73637534e6035120c699ebf8a1dfa65d9ab63eb88b8d721cc3",
       "tab/comments_rules.luau": "aa1c376ca0d21352f7a531fbf013845c12493511ffd33bbe60283da6338acd3f",
       "tab/comments_ui.luau": "4cb82b401261f85cd6e27ef2f4715a69988ebe11e2436cfa3302f4718baf8e2f",
@@ -181,19 +182,19 @@
       "tab/roots.luau": "78704bf4bf6172315f89af7dce1b64354717ecd04c8ad844464a34f1f70cca3c",
       "tab/scroll.luau": "1e4c415e1da8efe6a5ab6b6f70d867c56f31f10bb4b02c4a93cd492056ec7ab3",
       "tab/sel_colors.luau": "4d4be6f6b50fa09ac2d02e9adfff2bf4a1c0f532c32a2cbbc4f97fd2769c6362",
-      "tab/service_source.luau": "bb874ab4f2ec7e2d0b5f8f2bf38ab7de57d2cfdd3acfcd5b4b703fd5d91d0342",
+      "tab/service_source.luau": "c8bb9806e03b4291f5476270198324048f5d9599dab588b21afc659effe4881b",
       "tab/share.luau": "519813d4627bd050ffa6a40d2f9031805a1d3d13dfbd0acd2f08ccad569f59af",
-      "tab/shell.luau": "3e951fa6d809d4da99fa2e7961ce26fd9155840fd0788a15730cb673c928ffca",
+      "tab/shell.luau": "3bdeece286e1c789d237131f7067b8427d8fe013bf438f0d37def675ffb4459d",
       "tab/smart.luau": "ac345cb27cfe33867e5062f2f354977b29d304e972dea0eeda56985a14b5bd8b",
       "tab/spacing.luau": "0d893c3e5032f6ddb5aa3e044f18ae9de32dce4998a3af32a983f71bc1f9fa77",
       "tab/states.luau": "a1e318ea223c059852dc645a490eb2c51acf7061bf038bb3c676cffa459d039a",
       "tab/toast.luau": "90a9f112399f8823f6394d446c4b75a82fb9d92913693e87a9d3c03fe52594df",
       "tab/variables.luau": "c58dc1f7f3d345c6159c2880d770e5f9aaa40f028c2f01900bfcc3d38f73f2fb",
       "tab/variants.luau": "c55bf87bac8d8cc75e6a30119ef3626f32fd9b9ec6c2b2924b28a945ce82f8c0",
-      "tab/variations_bar.luau": "7f95548de17a47f01a2df6cd3df4215d54b37aa20f4b67cb7f02bffe9d4d2349",
+      "tab/variations_bar.luau": "0993a05015ea660cae1766e82d2226e1f2bd453138f29aa4da661a516ec766cb",
       "tab/zgx.json": "9669d5ffa2c81cc403850456ebcc1b2ce1b8b7c49adf2b544d551edfe1f2efad",
       "zeron.luau": "bb9a98bd24183c84f86a1a476f5cf1085b56157485d12f917e679e2fddac41c3"
     },
-    "sig": "O4d0shHy6r5LPA8Xo2Br5SesA8xXQbMO0DWnlBqsxDNn81g0U0JkM5G6LFaN-kghu6iqv3Osns4bRGw2QLAuAA"
+    "sig": "DO5RTKYRXigoDjyRuXpOOWMJeS8P0YUb1ST0hZnWWwHZ8clnRVrkFdBjuhRGDXfU5w3VR86uzwukPy7Ywq7kCg"
   }
 }

@@ -7,19 +7,30 @@
 --   new     a cover in the colour behind the node, its top edge (an accent
 --           line) sweeping down to show it; its first 5 children (8 px or
 --           more) outlined one after another; a ring round it pulsing.
+--   shell   (N8) a new node built in one call with 2+ parts: its cover goes
+--   + part  fast, then each part (child, reading order) has its own cover
+--           sweep and outline, one after another (agent_fx_plan.luau).
 --   edit    a weaker tint over the node, fading.
 --   delete  a tint at the node's last box sweeping down and fading.
 --   read    a pale wash rising over the Screen the agent screenshot.
 --   working dots above each node an agent marked `inProgress`, blinking at
 --           their own speeds, until it clears it.
 --
--- Only what's on screen is mounted (off screen: nothing runs). "Reduce agent
--- animations" (`reduce()`) keeps a still marker and lets the Canvas's own
--- flash outline show changes (canvas.luau), with nothing moving here.
+-- Only what's on screen is mounted (off screen: nothing runs). (N8) An effect
+-- plays once: one that goes off screen is dropped (never replays when panned
+-- back); one first seen after it began doesn't play; every effect is gone at
+-- its end (one ticker for the layer, not timers in an effect: zgx stops an
+-- effect's timers when it runs again). A cover shows only at the size it
+-- was made for: zoomed (or the node resized) mid-sweep, it goes.
+-- "Reduce agent animations" (`reduce()`) keeps a still marker and lets the
+-- Canvas's own flash outline show changes (canvas.luau), nothing moving here.
+
+local Plan = require("./agent_fx_plan")
 
 local M = {}
 
-M.MS = { new = 1200, edit = 900, delete = 800, read = 1400 }
+M.MS = Plan.MS
+M.Plan = Plan
 -- "Reduce agent animations", one state for the window: the shell sets it
 -- (from prefs and its palette), the Canvas reads it. (A named `ui.state` is
 -- the module's own, so it's held here, where both require it.)
@@ -76,31 +87,92 @@ function M.backdrop(ix: any, id: string, board: string): string
 	return board
 end
 
+-- The group an entry belongs to: one agent call (service_source sets `call`).
+local function group_of(e: any): string
+	if e.call ~= nil then
+		return `c{e.call}`
+	end
+	return `t{e.at or 0}|{e.chat or ""}|{if e.kind == "delete" then "d" else ""}`
+end
+
 -- o = {
 --   id, fx: State<{ entry }>, ix: { get, peek }, view: State<{x,y,zoom}?>,
 --   size: State<{w,h}>, look: () -> L (canvas_look), reduce: () -> boolean,
 -- }
 function M.Layer(o: any): Node
 	local fx = o.fx
-	-- Each entry goes when done (one timer an entry, not a frame clock).
-	local timed: { [string]: boolean } = {}
-	ui.effect(function()
-		local list = fx:get()
+	-- Each call's units, planned once when first seen (group key → units).
+	local planned: { [string]: { any } } = {}
+	-- Units mounted at the last look, and those never to show again.
+	local mounted: { [string]: boolean } = {}
+	local dead: { [string]: boolean } = {}
+
+	-- The units of the entries now (planning new groups), in drawing order.
+	local function units_now(list: { any }, i: any, v: any): { any }
+		local groups: { [string]: { any } } = {}
+		local order: { string } = {}
 		for _, e in list do
-			if not timed[e.key] then
-				timed[e.key] = true
-				local left = (M.MS[e.kind] or 1000) + 500 - (ui.now() - (e.at or 0))
-				ui.after(math.max(0, left), function()
-					timed[e.key] = nil
-					local keep = {}
-					for _, x in fx:peek() do
-						if x.key ~= e.key then
-							table.insert(keep, x)
-						end
-					end
-					fx:set(keep)
-				end)
+			local g = group_of(e)
+			if not groups[g] then
+				groups[g] = {}
+				table.insert(order, g)
 			end
+			table.insert(groups[g], e)
+		end
+		local out = {}
+		for _, g in order do
+			local us = planned[g]
+			if not us then
+				us = Plan.plan(groups[g], i, if v then v.zoom else 1)
+				planned[g] = us
+			end
+			for _, u in us do
+				table.insert(out, u)
+			end
+		end
+		return out
+	end
+
+	-- Entries go when their call is done: one ticker for the layer (made in
+	-- the build, so no effect's re-run stops it), cheap when there's nothing.
+	ui.every(250, function()
+		local list = fx:peek()
+		if #list == 0 then
+			return
+		end
+		local now = ui.now()
+		local keep, gone = {}, false
+		local ends: { [string]: number } = {}
+		for _, e in list do
+			local g = group_of(e)
+			local t = ends[g]
+			if t == nil then
+				local us = planned[g]
+				-- (not planned yet, e.g. never on screen: the longest a call takes)
+				t = if us then Plan.ends(us) else (e.at or 0) + Plan.CAP + Plan.MS.new + 400
+				ends[g] = t
+			end
+			if now > t + 100 then
+				gone = true
+			else
+				table.insert(keep, e)
+			end
+		end
+		if gone then
+			local still: { [string]: boolean } = {}
+			for _, e in keep do
+				still[group_of(e)] = true
+			end
+			for g, us in planned do
+				if not still[g] then
+					planned[g] = nil
+					for _, u in us do
+						mounted[u.key] = nil
+						dead[u.key] = nil
+					end
+				end
+			end
+			fx:set(keep)
 		end
 	end)
 
@@ -112,15 +184,15 @@ function M.Layer(o: any): Node
 		end
 		return { x, y, w, h }
 	end
-	local function bounds_of(e: any, i: any): { number }?
-		if e.box then
-			return e.box
+	local function bounds_of(u: any, i: any): { number }?
+		if u.box then
+			return u.box
 		end
-		local n = i.by[e.id]
+		local n = i.by[u.id]
 		return if n then n.bounds else nil
 	end
 
-	-- What shows now: the entries on screen (keys), their boxes by key.
+	-- What shows now: the units on screen (keys), their boxes by key.
 	local shown = ui.computed(function(): any
 		local list = fx:get()
 		local v = o.view:get()
@@ -128,16 +200,24 @@ function M.Layer(o: any): Node
 		local i = o.ix:get()
 		local out, at = {}, {}
 		if not v or #list == 0 then
+			mounted = {}
 			return { list = out, at = at }
 		end
 		local reduce = o.reduce()
-		for _, e in list do
-			if not (reduce and (e.kind ~= "delete")) then
-				local b = bounds_of(e, i)
+		local now = ui.now()
+		local was = mounted
+		mounted = {}
+		for _, u in units_now(list, i, v) do
+			if not dead[u.key] and not (reduce and u.kind ~= "delete") then
+				local b = bounds_of(u, i)
 				local r = if b then screen(b, v, s, 8) else nil
-				if r then
-					table.insert(out, e)
-					at[e.key] = r
+				local st = Plan.state(u, now, r ~= nil, was[u.key] == true)
+				if st == "dead" then
+					dead[u.key] = true
+				elseif st == "show" and r then
+					table.insert(out, u)
+					at[u.key] = r
+					mounted[u.key] = true
 				end
 			end
 		end
@@ -152,6 +232,8 @@ function M.Layer(o: any): Node
 		local r = shown:peek().at[key]
 		return r or { -10000, -10000, 1, 1 }
 	end
+	-- (whole points round the box: its far edges rounded out too, so no
+	-- row of the node peeks out under a cover)
 	local function place(key: string, inset: number?): any
 		local d = inset or 0
 		return {
@@ -164,10 +246,12 @@ function M.Layer(o: any): Node
 				return math.floor(rect(key)[2]) - d
 			end,
 			w = function(): number
-				return math.max(1, math.ceil(rect(key)[3]) + 2 * d)
+				local r = rect(key)
+				return math.max(1, math.ceil(r[1] + r[3]) - math.floor(r[1]) + 2 * d)
 			end,
 			h = function(): number
-				return math.max(1, math.ceil(rect(key)[4]) + 2 * d)
+				local r = rect(key)
+				return math.max(1, math.ceil(r[2] + r[4]) - math.floor(r[2]) + 2 * d)
 			end,
 		}
 	end
@@ -177,21 +261,87 @@ function M.Layer(o: any): Node
 		end
 		return t
 	end
+	-- ms until `u` starts (its animations' delay), from now
+	local function wait(u: any): number
+		return math.max(0, u.at + u.start - ui.now())
+	end
+	-- A cover's clip: the node's box while it is the size the sweep was
+	-- made for (h0); none once zoomed or resized, so a cover never stays.
+	local function clip(key: string, h0: number, kids: { any }): Node
+		return ui.div(with({
+			absolute = true,
+			left = 0,
+			top = 0,
+			right = 0,
+			h = function(): number
+				local r = rect(key)
+				return if math.abs(r[4] - h0) <= 0.75 then math.max(1, math.ceil(r[2] + r[4]) - math.floor(r[2])) else 0
+			end,
+			overflow = "hidden",
+			pointer_events = "none",
+		}, kids))
+	end
+	-- The cover: the colour behind, an accent top edge, sliding down by h0.
+	local function cover(back: string, accent: string, h0: number, dur: number, delay: number): Node
+		return ui.div {
+			absolute = true,
+			left = 0,
+			top = 0,
+			right = 0,
+			bottom = 0,
+			bg = back,
+			on_mount = function(el: any)
+				-- (+2: past the box's rounded-out bottom edge)
+				animate(el, { y = { 0, math.max(1, h0) + 2 }, duration = dur, delay = delay, ease = EASE_OUT })
+			end,
+			ui.div { absolute = true, left = 0, right = 0, top = 0, h = 1.5, bg = hex_alpha(accent, 0.9) },
+		}
+	end
+	local function ring(L: any, life: number, delay: number, pad: number?): Node
+		local d = pad or 3
+		return ui.div {
+			absolute = true,
+			left = -d,
+			top = -d,
+			right = -d,
+			bottom = -d,
+			pointer_events = "none",
+			border = 1.5,
+			border_color = L.accent,
+			rounded = 6,
+			opacity = 0,
+			on_mount = function(el: any)
+				animate(el, {
+					keyframes = {
+						["0%"] = { opacity = 0 },
+						["12%"] = { opacity = 1 },
+						["40%"] = { opacity = 0.35 },
+						["65%"] = { opacity = 0.9 },
+						["100%"] = { opacity = 0 },
+					},
+					duration = life,
+					delay = delay,
+					ease = "linear",
+				})
+			end,
+		}
+	end
 
-	local function build_new(e: any): Node
+	local function build_new(u: any): Node
 		local L = o.look()
 		local dur = M.MS.new
 		local i = o.ix:peek()
-		local back = M.backdrop(i, e.id, L.board)
-		local h0 = rect0(e.key)[4]
+		local back = M.backdrop(i, u.id, L.board)
+		local h0 = rect0(u.key)[4]
+		local d0 = wait(u)
 		-- the first 5 children 8 px or more, as fractions of the node's box
 		local kids = {}
-		local n = i.by[e.id]
+		local n = i.by[u.id]
 		if n then
 			local b = n.bounds
 			local v = o.view:peek()
 			local z = if v then v.zoom else 1
-			for _, cid in i.kids[e.id] or {} do
+			for _, cid in i.kids[u.id] or {} do
 				local c = i.by[cid]
 				if c and c.bounds[3] * z >= 8 and c.bounds[4] * z >= 8 and b[3] > 0 and b[4] > 0 then
 					table.insert(kids, {
@@ -219,16 +369,16 @@ function M.Layer(o: any): Node
 				absolute = true,
 				pointer_events = "none",
 				left = function(): number
-					return q[1] * rect(e.key)[3]
+					return q[1] * rect(u.key)[3]
 				end,
 				top = function(): number
-					return q[2] * rect(e.key)[4]
+					return q[2] * rect(u.key)[4]
 				end,
 				w = function(): number
-					return math.max(1, q[3] * rect(e.key)[3])
+					return math.max(1, q[3] * rect(u.key)[3])
 				end,
 				h = function(): number
-					return math.max(1, q[4] * rect(e.key)[4])
+					return math.max(1, q[4] * rect(u.key)[4])
 				end,
 				border = 1,
 				border_color = L.accent,
@@ -242,69 +392,77 @@ function M.Layer(o: any): Node
 							[`{math.floor(hold)}%`] = { opacity = 1 },
 							["100%"] = { opacity = 0 },
 						},
-						delay = on_at,
+						delay = d0 + on_at,
 						duration = total,
 						ease = "linear",
 					})
 				end,
 			})
 		end
-		return ui.div(with(place(e.key), {
+		return ui.div(with(place(u.key), {
 			-- the cover, cut to the node's box, its top edge sweeping down
+			clip(u.key, h0, { cover(back, L.accent, h0, 0.62 * dur, d0 + 0.12 * dur) }),
+			ring(L, dur + 400, d0),
+			table.unpack(outlines),
+		}))
+	end
+
+	-- (N8) a new node's own cover going fast, its ring held while its parts come
+	local function build_shell(u: any): Node
+		local L = o.look()
+		local i = o.ix:peek()
+		local back = M.backdrop(i, u.id, L.board)
+		local h0 = rect0(u.key)[4]
+		local d0 = wait(u)
+		return ui.div(with(place(u.key), {
+			clip(u.key, h0, { cover(back, L.accent, h0, Plan.SHELL, d0) }),
+			ring(L, u.life, d0),
+		}))
+	end
+
+	-- (N8) one part of a new node: covered (in its parent's colour) until its
+	-- turn, then its own sweep and a thin outline that fades after it
+	local function build_part(u: any): Node
+		local L = o.look()
+		local i = o.ix:peek()
+		local back = M.backdrop(i, u.id, L.board)
+		local h0 = rect0(u.key)[4]
+		local d0 = wait(u)
+		local fin = 8
+		local hold = math.floor(Plan.PART / Plan.PART_LIFE * 100)
+		return ui.div(with(place(u.key), {
+			clip(u.key, h0, { cover(back, L.accent, h0, Plan.PART, d0) }),
 			ui.div {
 				absolute = true,
-				left = 0,
-				top = 0,
-				right = 0,
-				bottom = 0,
-				overflow = "hidden",
+				left = -1,
+				top = -1,
+				right = -1,
+				bottom = -1,
 				pointer_events = "none",
-				ui.div {
-					absolute = true,
-					left = 0,
-					top = 0,
-					right = 0,
-					bottom = 0,
-					bg = back,
-					on_mount = function(el: any)
-						animate(el, { y = { 0, math.max(1, h0) }, duration = 0.62 * dur, delay = 0.12 * dur, ease = EASE_OUT })
-					end,
-					ui.div { absolute = true, left = 0, right = 0, top = 0, h = 1.5, bg = hex_alpha(L.accent, 0.9) },
-				},
-			},
-			-- the ring
-			ui.div {
-				absolute = true,
-				left = -3,
-				top = -3,
-				right = -3,
-				bottom = -3,
-				pointer_events = "none",
-				border = 1.5,
+				border = 1,
 				border_color = L.accent,
-				rounded = 6,
+				rounded = 4,
 				opacity = 0,
 				on_mount = function(el: any)
 					animate(el, {
 						keyframes = {
 							["0%"] = { opacity = 0 },
-							["12%"] = { opacity = 1 },
-							["40%"] = { opacity = 0.35 },
-							["65%"] = { opacity = 0.9 },
+							[`{fin}%`] = { opacity = 1 },
+							[`{hold}%`] = { opacity = 0.8 },
 							["100%"] = { opacity = 0 },
 						},
-						duration = dur + 400,
+						delay = d0,
+						duration = Plan.PART_LIFE,
 						ease = "linear",
 					})
 				end,
 			},
-			table.unpack(outlines),
 		}))
 	end
 
-	local function build_edit(e: any): Node
+	local function build_edit(u: any): Node
 		local L = o.look()
-		return ui.div(with(place(e.key), {
+		return ui.div(with(place(u.key), {
 			bg = hex_alpha(L.accent, 0.22),
 			border = 1.5,
 			border_color = L.accent,
@@ -320,12 +478,12 @@ function M.Layer(o: any): Node
 		}))
 	end
 
-	local function build_delete(e: any): Node
+	local function build_delete(u: any): Node
 		local L = o.look()
 		local dur = M.MS.delete
-		local h0 = rect0(e.key)[4]
+		local h0 = rect0(u.key)[4]
 		if o.reduce() then
-			return ui.div(with(place(e.key), {
+			return ui.div(with(place(u.key), {
 				border = 1,
 				border_color = hex_alpha(L.accent, 0.7),
 				on_mount = function(el: any)
@@ -333,63 +491,69 @@ function M.Layer(o: any): Node
 				end,
 			}))
 		end
-		return ui.div(with(place(e.key), {
-			overflow = "hidden",
-			ui.div {
-				absolute = true,
-				left = 0,
-				top = 0,
-				right = 0,
-				bottom = 0,
-				bg = hex_alpha(L.name_hover, 0.16),
-				border = 1,
-				border_color = hex_alpha(L.accent, 0.8),
-				on_mount = function(el: any)
-					animate(el, { y = { 0, math.max(1, h0) }, opacity = { 0.8, 0 }, duration = dur, ease = "inOutSine" })
-				end,
-			},
+		return ui.div(with(place(u.key), {
+			clip(u.key, h0, {
+				ui.div {
+					absolute = true,
+					left = 0,
+					top = 0,
+					right = 0,
+					bottom = 0,
+					bg = hex_alpha(L.name_hover, 0.16),
+					border = 1,
+					border_color = hex_alpha(L.accent, 0.8),
+					on_mount = function(el: any)
+						animate(el, { y = { 0, math.max(1, h0) }, opacity = { 0.8, 0 }, duration = dur, ease = "inOutSine" })
+					end,
+				},
+			}),
 		}))
 	end
 
-	local function build_read(e: any): Node
+	local function build_read(u: any): Node
 		local L = o.look()
 		local dur = M.MS.read
-		local h0 = rect0(e.key)[4]
-		return ui.div(with(place(e.key), {
-			overflow = "hidden",
-			ui.div {
-				absolute = true,
-				left = 0,
-				top = 0,
-				right = 0,
-				bottom = 0,
-				bg = hex_alpha(L.board, 0.55),
-				opacity = 0,
-				on_mount = function(el: any)
-					animate(el, {
-						keyframes = {
-							["0%"] = { y = math.max(1, h0), opacity = 1 },
-							["50%"] = { y = 0, opacity = 1 },
-							["100%"] = { y = 0, opacity = 0 },
-						},
-						duration = dur,
-						ease = "inOutSine",
-					})
-				end,
-				ui.div { absolute = true, left = 0, right = 0, top = 0, h = 1.5, bg = hex_alpha(L.accent, 0.7) },
-			},
+		local h0 = rect0(u.key)[4]
+		return ui.div(with(place(u.key), {
+			clip(u.key, h0, {
+				ui.div {
+					absolute = true,
+					left = 0,
+					top = 0,
+					right = 0,
+					bottom = 0,
+					bg = hex_alpha(L.board, 0.55),
+					opacity = 0,
+					on_mount = function(el: any)
+						animate(el, {
+							keyframes = {
+								["0%"] = { y = math.max(1, h0), opacity = 1 },
+								["50%"] = { y = 0, opacity = 1 },
+								["100%"] = { y = 0, opacity = 0 },
+							},
+							duration = dur,
+							ease = "inOutSine",
+						})
+					end,
+					ui.div { absolute = true, left = 0, right = 0, top = 0, h = 1.5, bg = hex_alpha(L.accent, 0.7) },
+				},
+			}),
 		}))
 	end
 
-	local function item(e: any): Node
-		if e.kind == "new" then
-			return build_new(e)
-		elseif e.kind == "edit" then
-			return build_edit(e)
-		elseif e.kind == "delete" then
-			return build_delete(e)
-		elseif e.kind == "read" then
-			return build_read(e)
+	local function item(u: any): Node
+		if u.kind == "new" then
+			return build_new(u)
+		elseif u.kind == "shell" then
+			return build_shell(u)
+		elseif u.kind == "part" then
+			return build_part(u)
+		elseif u.kind == "edit" then
+			return build_edit(u)
+		elseif u.kind == "delete" then
+			return build_delete(u)
+		elseif u.kind == "read" then
+			return build_read(u)
 		end
 		return ui.div {}
 	end
@@ -491,8 +655,8 @@ function M.Layer(o: any): Node
 		ui.each(ui.computed(function(): { any }
 			return shown:get().list
 		end), item, {
-			key = function(e: any): string
-				return e.key
+			key = function(u: any): string
+				return u.key
 			end,
 		}),
 		ui.each(ui.computed(function(): { any }
