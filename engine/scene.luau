@@ -307,6 +307,42 @@ function M.items(root: any, opts: any?): { any }
 		end
 		if t == "frame" and (node.layout == "horizontal" or node.layout == "vertical") then
 			item.lay = node.layout
+			-- (N7) `flow`: what the Canvas's spacing handles show and change:
+			-- gap `g`, padding `p` {t, r, b, l}, `j` justify, `a` align, `hug`
+			-- bits (1 width, 2 height hug their children).
+			local p = node.padding
+			local t, r, bb, l = 0, 0, 0, 0
+			if type(p) == "number" then
+				t, r, bb, l = p, p, p, p
+			elseif type(p) == "table" then
+				if #p == 2 then
+					t, bb, l, r = p[1], p[1], p[2], p[2]
+				elseif #p == 4 then
+					t, r, bb, l = p[1], p[2], p[3], p[4]
+				elseif #p >= 1 then
+					t, r, bb, l = p[1], p[1], p[1], p[1]
+				end
+			end
+			local function nz(v: any): number
+				return if type(v) == "number" then v else 0
+			end
+			local sz = Layout.sizing(node)
+			local hug = (if sz[1] == "fit" then 1 else 0) + (if sz[2] == "fit" then 2 else 0)
+			item.flow = {
+				g = nz(node.gap),
+				p = { nz(t), nz(r), nz(bb), nz(l) },
+				j = if type(node.justifyContent) == "string" then node.justifyContent else nil,
+				a = if type(node.alignItems) == "string" then node.alignItems else nil,
+				hug = if hug > 0 then hug else nil,
+			}
+		end
+		-- (N7) in a flow: which axes it fills (1 width, 2 height)
+		if parent and node.absolute ~= true and (parent.layout == "horizontal" or parent.layout == "vertical") and parent.type == "frame" then
+			local sz = Layout.sizing(node)
+			local fl = (if sz[1] == "fill" then 1 else 0) + (if sz[2] == "fill" then 2 else 0)
+			if fl > 0 then
+				item.fl = fl
+			end
 		end
 		if node.absolute == true then
 			item.abs = true

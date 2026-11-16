@@ -24,10 +24,14 @@ local Handoff = require("./engine/handoff")
 local Proto = require("./engine/proto")
 local Sim = require("./engine/sim")
 local Comments = require("./engine/comments")
+local History = require("./engine/history") -- (N3)
+local AgentFx = require("./engine/agent_fx") -- (N1)
+local Variations = require("./engine/variations") -- (N2)
 
 Boot.fonts(zeron)
 Designs.init(zeron)
 Comments.init(zeron)
+History.init(zeron)
 Icons.init(zeron)
 Images.init(zeron)
 Webfonts.init(zeron)
@@ -64,7 +68,7 @@ local function emit(name: string, data: any)
 	end
 end
 
-local function tell_changed(d: any, c: any, by: string, label: string, chat: string?, flash: any?, made: any?)
+local function tell_changed(d: any, c: any, by: string, label: string, chat: string?, flash: any?, made: any?, fx: any?)
 	if not c then
 		return
 	end
@@ -72,6 +76,14 @@ local function tell_changed(d: any, c: any, by: string, label: string, chat: str
 		did = d.did, version = c.version, roots = c.roots, removed = c.removed, order = c.order,
 		by = by, chat = chat, label = label, flash = flash, ids = made, flows = d.doc.flows,
 		prototype = d.doc.prototype, device = Proto.played_prototype(d.doc.prototype),
+		-- (N3 history) the undo step this made and the roots it holds
+		seq = c.seq, touched = c.touched,
+		-- (N1) each change's kind, for the tab's animations: { { id, kind } }
+		fx = fx,
+		-- (N4) the Design's brief
+		brief = d.doc.brief,
+		-- (N2) the Variations sets: { [id] = { current, count, names, original } }
+		variations = Variations.summary(d.doc) or {},
 	})
 end
 
@@ -226,7 +238,7 @@ function M.scene(args: any): any
 			table.insert(out, entry)
 		end
 	end
-	return { did = d.did, version = d.version, theme = theme, roots = out, removed = if #removed > 0 then removed else nil, order = order_of(d), more = if #more > 0 then more else nil, flows = d.doc.flows, prototype = d.doc.prototype, device = Proto.played_prototype(d.doc.prototype) }
+	return { did = d.did, version = d.version, theme = theme, roots = out, removed = if #removed > 0 then removed else nil, order = order_of(d), more = if #more > 0 then more else nil, flows = d.doc.flows, prototype = d.doc.prototype, device = Proto.played_prototype(d.doc.prototype), brief = d.doc.brief, variations = Variations.summary(d.doc) or {} }
 end
 
 -- â”€â”€ calls from the window â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -239,6 +251,8 @@ local function summary(d: any): any
 		selection = (Designs.kv_get("sel:" .. d.did) or {}).ids or {},
 		can_undo = u, can_redo = r, flows = d.doc.flows,
 		prototype = d.doc.prototype, device = Proto.played_prototype(d.doc.prototype),
+		brief = d.doc.brief,
+		variations = Variations.summary(d.doc) or {},
 	}
 end
 
@@ -476,6 +490,56 @@ serve("node", function(args)
 	return { node = raw, box = box and { x = box.x, y = box.y, w = box.w, h = box.h }, resolved = resolved, variant = variant }
 end, true)
 
+-- (N5) Selection colors: the paints of the selected layers and everything
+-- inside them (an Instance's insides under their `inst/child` ids), as
+-- written: Tokens kept, hidden layers left out. At most `max` layers
+-- (default 3000; `more` says some were left).
+serve("paints", function(args)
+	local d = held(did_of(args))
+	local draft = Edit.draft(d)
+	local ids = if type(args.ids) == "table" then args.ids else {}
+	local max = if type(args.max) == "number" then math.clamp(args.max, 1, 20000) else 3000
+	local out, seen, more = {}, {}, false
+	-- (one resolve a root: the other selected layers in it are looked up)
+	local by: { [string]: any } = {}
+	local function index(n)
+		by[n.id] = n
+		for _, c in (n.children or {}) do
+			index(c)
+		end
+	end
+	local function walk(n)
+		if more or seen[n.id] then
+			return
+		end
+		if #out >= max then
+			more = true
+			return
+		end
+		seen[n.id] = true
+		table.insert(out, { id = n.id, type = n.type, fill = n.fill, stroke = n.stroke, effect = n.effect })
+		for _, c in (n.children or {}) do
+			walk(c)
+		end
+	end
+	for _, id in ids do
+		if type(id) == "string" then
+			local n = by[id]
+			if not n then
+				local found, roots = draft:resolved_find(id, { keep_tokens = true })
+				for _, r in (roots or {}) do
+					index(r)
+				end
+				n = found
+			end
+			if n then
+				walk(n)
+			end
+		end
+	end
+	return { layers = out, more = more }
+end, true)
+
 serve("edit", function(args)
 	local d = held(did_of(args))
 	local draft = Edit.draft(d)
@@ -487,7 +551,14 @@ serve("edit", function(args)
 	end
 	draft:finish()
 	local label = if type(args.label) == "string" then args.label else "Edit"
-	local c = Designs.commit(d, label, "person", nil, args.join == true)
+	-- (N2) flipping through Variations is no undo step of its own
+	local quiet = type(args.ops) == "table" and #args.ops > 0
+	for _, op in (if type(args.ops) == "table" then args.ops else {}) do
+		if type(op) ~= "table" or op.op ~= "variation" or op.show == nil then
+			quiet = false
+		end
+	end
+	local c = Designs.commit(d, label, "person", nil, args.join == true, quiet)
 	tell_changed(d, c, "person", label, nil, nil, made)
 	return { version = d.version, ids = made, warnings = if #draft.warnings > 0 then draft.warnings else nil }
 end)
@@ -600,6 +671,45 @@ serve("undo", function(args)
 end)
 serve("redo", function(args)
 	return step(args, false)
+end)
+
+-- (N3) The History tab (engine/history.luau, pure/anim/n3/README.md): the
+-- steps newest first; a step's before/after pictures (read, or kept as the
+-- tab drew them); Undo / Undo to here.
+serve("history", function(args)
+	return History.list(held(did_of(args)))
+end, true)
+serve("history_thumbs", function(args)
+	local d = held(did_of(args))
+	if type(args.seq) ~= "number" then
+		fail("bad_params", "needs a seq")
+	end
+	return { thumbs = History.thumbs(d.did, args.seq) }
+end, true)
+serve("history_thumb", function(args)
+	local d = held(did_of(args))
+	if type(args.seq) ~= "number" or type(args.root) ~= "string" then
+		fail("bad_params", "needs a seq and a root")
+	end
+	local kept = History.put_thumb(d.did, args.seq, args.root, args.before, args.after)
+	if kept then
+		emit("history", { did = d.did, seq = args.seq })
+	end
+	return { kept = kept }
+end)
+serve("undo_to", function(args)
+	local d = held(did_of(args))
+	if type(args.seq) ~= "number" then
+		fail("bad_params", "needs a seq")
+	end
+	local list, why = History.undo_to(d, args.seq, args.keep == true, if type(args.expect) == "number" then args.expect else nil)
+	if not list then
+		fail("nothing", why or "nothing to undo")
+	end
+	for _, c in list do
+		tell_changed(d, c, "undo", c.label)
+	end
+	return { undone = #list, version = d.version }
 end)
 
 serve("select", function(args)
@@ -856,6 +966,51 @@ local function screenshots(d: any, shots: { any }): ({ any }, { string })
 			end
 			continue
 		end
+		if shot.vary then
+			-- (N2) a version of a Variations set, drawn in its node's place as
+			-- a one-off frame (as Simulate's): the doc with that version shown
+			local vdoc, rid = Variations.doc_with(d.doc, shot.id, shot.vary)
+			local root = nil
+			if vdoc then
+				local okr, rs = pcall(function()
+					local r = Resolve.new(vdoc, d.view_theme)
+					local list = r:roots(vdoc, { rid })
+					Layout.run(list)
+					return list
+				end)
+				root = okr and rs[1] or nil
+			end
+			local box = nil
+			if root then
+				Resolve.walk({ root }, function(n)
+					if n.id == shot.id then
+						box = n.__box
+						return false
+					end
+					return true
+				end)
+			end
+			if root and box then
+				local items = Scene.items(root, { images = Images.links(d.did), icons = Agent.icons, screens = Proto.screens(vdoc) })
+				local cut = items
+				for i, it in items do
+					if it.id == shot.id then
+						cut = table.move(items, i, i + (it.n or 0), 1, {})
+						cut[1] = table.clone(cut[1])
+						cut[1].p = nil
+						break
+					end
+				end
+				sim_n += 1
+				local fid = "var" .. sim_n
+				sim_frames[fid] = { id = fid, nodes = cut }
+				local scale = math.min(2, SHOT_MAX / math.max(box.w, box.h, 1))
+				table.insert(reqs, { id = fid, label = shot.label, event = { did = d.did, root = fid, id = fid, scale = scale, x = box.x, y = box.y, w = math.max(box.w, 1), h = math.max(box.h, 1) } })
+			else
+				table.insert(gone, `no screenshot of {shot.label or shot.id}: that version isn't there any more`)
+			end
+			continue
+		end
 		local id = shot.id
 		local fine, roots = pcall(draft.laid_out, draft, id)
 		if not fine then
@@ -883,6 +1038,16 @@ local function screenshots(d: any, shots: { any }): ({ any }, { string })
 	end
 	-- (Laid out above, before any wait: what the call made, where it is now.)
 	local images, notes, shot_list = {}, gone, {}
+	-- (N2) which picture is which version
+	local labels = {}
+	for _, r in reqs do
+		if r.label and string.sub(r.id, 1, 3) == "var" then
+			table.insert(labels, r.label)
+		end
+	end
+	if #labels > 0 then
+		table.insert(notes, "pictures of versions, in order: " .. table.concat(labels, "; "))
+	end
 	for _, r in reqs do
 		local done, tries = render_one(r.event)
 		sim_frames[r.id] = nil
@@ -1138,7 +1303,14 @@ zeron.tool({
 			end
 		end) end
 		if committed then
-			tell_changed(d, committed, "agent", description, chat, flash, nil)
+			-- (N1) each change's kind (pcall: an animation's data never fails a call)
+			local fok, fx = pcall(AgentFx.changes, draft, 64)
+			tell_changed(d, committed, "agent", description, chat, flash, nil, if fok then fx else nil)
+		end
+		-- (N1) the Screens it screenshot: the tab shows a pale "read" wash
+		local rok, reads = pcall(AgentFx.reads, draft)
+		if rok and #reads > 0 then
+			emit("read", { did = d.did, chat = chat, roots = reads })
 		end
 		if type(seen) == "number" and seen < before then
 			result.notice = "the Design changed since your last call (another chat or the person): re-read nodes before changing what you didn't just make"
@@ -1156,6 +1328,9 @@ zeron.tool({
 				if type(s) == "table" and s.sim then
 					-- a Simulate view (engine/sim.luau)
 					table.insert(shots, { sim = s.sim })
+				elseif type(s) == "table" and s.vary then
+					-- (N2) a version of a Variations set
+					table.insert(shots, { id = s.id, vary = s.vary, label = s.label })
 				elseif type(s) == "table" then
 					-- a state: drawn on the node with states at or above it
 					table.insert(shots, { id = s.id, state = { id = M.driver_of(d, s.id), s = s.state } })
@@ -1206,8 +1381,19 @@ zeron.tool({
 				local sel = Designs.kv_get("sel:" .. did) or {}
 				-- (step 7) the open comments the person left in Play
 				local cok, clist = pcall(Comments.list, did)
-				local open_c = if cok then Comments.for_agents(clist, d.doc, false) else {}
+				local open_c = if cok then Comments.for_agents(clist, d.doc, false, true) else {}
 				local entry: any = { did = did, name = d.name, version = d.version, selection = sel.ids or {} }
+				-- (N4) the Design's brief: read it before designing; SetBrief keeps it current
+				entry.brief = d.doc.brief or "(none yet: write one with SetBrief before a new design)"
+				-- (N2) Variations sets waiting for the person to pick one
+				local vs = Variations.summary(d.doc)
+				if vs then
+					local list = {}
+					for id, s in vs do
+						table.insert(list, { id = id, showing = `{s.current} of {s.count} · {s.names[s.current]}`, versions = s.names })
+					end
+					entry.variations = list
+				end
 				if #open_c > 0 then
 					local MAX = 30
 					entry.comments = table.move(open_c, 1, math.min(#open_c, MAX), 1, {})

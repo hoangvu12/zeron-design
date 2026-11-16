@@ -16,6 +16,8 @@ local Scene = require("./scene")
 local Vars = require("./vars")
 local Expr = require("./expr")
 local Comments = require("./comments")
+local Text = require("./text")
+local Variations = require("./variations")
 local Smart = require("../tab/smart")
 
 local M = {}
@@ -167,6 +169,123 @@ function M.env(draft: any, zeron: any, G: any, chat: string?): any
 			mark(props)
 		end
 		return made(draft:copy(id_of(id) :: string, id_of(parent), props))
+	end)
+	-- (N4) Duplicate(id, props?): a copy beside the original (after it in its
+	-- parent; on the Canvas, in empty space to its right unless props give
+	-- x/y). `props.parent` puts it elsewhere. Returns { id, map }: map is
+	-- old id → new id for every node copied, so no re-read is needed.
+	env.Duplicate = api("Duplicate", function(id: any, props: any)
+		local sid = id_of(id)
+		if type(sid) ~= "string" then
+			draft:fail("Duplicate takes a node's id: Duplicate(id, { x = 400 })")
+		end
+		props = if type(props) == "table" then table.clone(props) else {}
+		local parent_given = props.parent ~= nil
+		local parent = if parent_given then id_of(props.parent) else nil
+		props.parent = nil
+		local f = if Edit.is_inside(sid) then nil else draft:find(sid)
+		if not f and not Edit.is_inside(sid) then
+			draft:missing(sid)
+		end
+		if not parent_given then
+			if f then
+				parent = if f.parent then f.parent.id else nil
+			else
+				-- inside an Instance: beside the Instance
+				local top = draft:find(string.match(sid, "^([^/]+)") :: string)
+				parent = if top and top.parent then top.parent.id else nil
+			end
+		end
+		if parent == nil and props.x == nil and props.y == nil then
+			-- on the Canvas: in empty space right of the top-level node it's in
+			local ok, roots = pcall(draft.laid_out, draft, sid)
+			local box = nil
+			if ok then
+				Resolve.walk(roots, function(n)
+					if n.id == sid then
+						box = n.__box
+						return false
+					end
+					return true
+				end)
+			end
+			local top = if ok and roots[1] then roots[1].id else nil
+			if box and top then
+				local at = draft:empty_space({ width = box.w, height = box.h, from = top, direction = "right" })
+				props.x, props.y = at.x, at.y
+			end
+		end
+		local nid, map = draft:copy(sid, parent, props)
+		made(nid)
+		-- right after the original when it stays in the same parent
+		if f and not parent_given then
+			draft:move(nid, parent, f.index)
+		end
+		return { id = nid, map = map or { [sid] = nid } }
+	end)
+	-- (N4) A compact outline: one line a node, indented, cheaper than Get.
+	-- TreeSummary(id?, depth?) → text (Print or return it).
+	env.TreeSummary = api("TreeSummary", function(id: any, depth: any)
+		if type(id) == "number" and depth == nil then
+			id, depth = nil, id
+		end
+		return M.tree_summary(draft, id_of(id), if type(depth) == "number" then depth else nil)
+	end)
+	-- (N4) FindByStyle(query, root?, opts?) → ids of nodes whose drawn
+	-- value matches every key of `query` (a hex finds fills, strokes, and
+	-- Tokens with that value; "$name" finds that Token and its value).
+	-- A string query is a colour in any paint. opts.raw: only literal values
+	-- (not Tokens), to find hex that should be a Token.
+	env.FindByStyle = api("FindByStyle", function(q: any, root: any, opts: any)
+		return M.find_by_style(draft, q, id_of(root), type(opts) == "table" and opts.raw == true)
+	end)
+	-- (N4) The Design's brief (palette, type, spacing, mood), shown in
+	-- design_state and editable by the person in the tab.
+	env.SetBrief = api("SetBrief", function(text: any)
+		draft:set_brief(text)
+	end)
+	env.GetBrief = api("GetBrief", function()
+		return draft.d.doc.brief
+	end)
+	-- (N4) The font families text can use now: built in, and the Google
+	-- Fonts already fetched. Another Google family is fetched after the call
+	-- that first uses it (text in it measures in Geist until then).
+	env.Fonts = api("Fonts", function()
+		local seen, out = {}, {}
+		for _, f in Text.families do
+			if not seen[f] then
+				seen[f] = true
+				table.insert(out, f)
+			end
+		end
+		table.sort(out)
+		return out
+	end)
+	-- (N2) "Show me 5 ways": versions of a node, the original one of them,
+	-- shown one at a time in its place (the person flips them with a bar on
+	-- the board). Variations(id, { { name, build = function(id, map) … end
+	-- | props = {…} | node = {…} }, … }, { show? }) → the set.
+	env.Variations = api("Variations", function(id: any, list: any, opts: any)
+		if type(list) == "table" then
+			for _, e in list do
+				if type(e) == "table" and type(e.node) == "table" then
+					stamp(e.node)
+				end
+			end
+		end
+		return Variations.make(draft, id, list, opts, chat)
+	end)
+	env.GetVariations = api("GetVariations", function(id: any)
+		return Variations.get(draft, id)
+	end)
+	env.ShowVariation = api("ShowVariation", function(id: any, which: any)
+		return Variations.show(draft, id, which)
+	end)
+	env.KeepVariation = api("KeepVariation", function(id: any, which: any)
+		return Variations.keep(draft, id, which)
+	end)
+	env.DiscardVariations = api("DiscardVariations", function(id: any)
+		Variations.discard(draft, id)
 	end)
 	env.Replace = api("Replace", function(id: any, node: any)
 		stamp(node)
@@ -380,6 +499,34 @@ function M.env(draft: any, zeron: any, G: any, chat: string?): any
 		local state = type(opts) == "table" and opts.state or nil
 		if state ~= nil and not Proto.STATES[state] then
 			draft:fail(`TakeScreenshot's state is "hover" or "press", not {tostring(state)}`)
+		end
+		-- (N2) { variations = true }: one picture of each version of a
+		-- Variations set (in order); { variation = 3 | "name" }: that one
+		local vary = type(opts) == "table" and (opts.variations or opts.variation) or nil
+		if vary ~= nil then
+			for _, v in ids do
+				local set = Variations.get(draft, v)
+				if not set then
+					draft:fail(`"{tostring(id_of(v))}" has no variations`)
+				end
+				local sets = Variations.sets_of(draft.d.doc)
+				local which = {}
+				if opts.variations == true then
+					for i = 1, set.count do
+						table.insert(which, i)
+					end
+				else
+					local i = Variations.index_of(sets[set.id], vary)
+					if not i then
+						draft:fail(`"{tostring(vary)}" isn't a version of "{set.id}"`)
+					end
+					table.insert(which, i)
+				end
+				for _, i in which do
+					table.insert(draft.screenshots, { id = set.id, vary = i, label = `{i} of {set.count} · {set.versions[i].name}` })
+				end
+			end
+			return
 		end
 		for _, v in ids do
 			local id = id_of(v) :: string
@@ -882,6 +1029,284 @@ function M.env(draft: any, zeron: any, G: any, chat: string?): any
 	end
 	env.print = env.Print
 	return env
+end
+
+-- ── (N4) TreeSummary and FindByStyle ────────────────────────────────────
+
+local SUMMARY_LINES = 300
+
+local function flat(s: any, max: number): string
+	local t = string.gsub(tostring(s or ""), "%s+", " ")
+	if utf8.len(t) and (utf8.len(t) :: number) > max then
+		t = string.sub(t, 1, (utf8.offset(t, max) :: number) - 1) .. "…"
+	end
+	return t
+end
+
+local function num_text(v: any): string
+	if type(v) == "number" then
+		local r = math.floor(v * 10 + 0.5) / 10
+		return if r == math.floor(r) then tostring(math.floor(r)) else tostring(r)
+	elseif type(v) == "table" then
+		local out = {}
+		for _, x in v do
+			table.insert(out, num_text(x))
+		end
+		return table.concat(out, "/")
+	end
+	return tostring(v)
+end
+
+-- One line a drawn node: name (type id) W×H, where it sits when its own
+-- x, y place it, layout, text, Component, problems. Hidden layers aren't
+-- drawn, so they're left out.
+function M.tree_summary(draft: any, id: string?, depth: number?): string
+	local roots = draft:laid_out(id)
+	local raw = {}
+	if id then
+		Resolve.walk(roots, function(n)
+			if n.id == id then
+				raw = { n }
+				return false
+			end
+			return true
+		end)
+		if #raw == 0 then
+			draft:fail(`no node has the id "{id}" (or it isn't drawn: enabled = false)`)
+		end
+	else
+		raw = roots
+	end
+	local max_depth = depth or (if id then 3 else 1)
+	local lines, more = {}, 0
+	local comp_names = {}
+	Resolve.walk(draft.d.doc.children, function(n)
+		if n.reusable == true then
+			comp_names[n.id] = n.name
+		end
+		return true
+	end)
+	local function line(n: any, parent: any?, level: number)
+		local b = n.__box or { x = 0, y = 0, w = 0, h = 0 }
+		local s = `{string.rep("  ", level)}{flat(n.name, 40)} ({n.type} {n.id}) {num_text(b.w)}×{num_text(b.h)}`
+		local laid = parent and (parent.layout == "horizontal" or parent.layout == "vertical")
+		if not laid or n.absolute == true then
+			local px, py = 0, 0
+			if parent and parent.__box then
+				px, py = parent.__box.x, parent.__box.y
+			end
+			s ..= ` @{num_text(b.x - px)},{num_text(b.y - py)}`
+		end
+		if n.type == "frame" and (n.layout == "horizontal" or n.layout == "vertical") then
+			s ..= if n.layout == "horizontal" then " row" else " col"
+			if n.gap ~= nil and n.gap ~= 0 then
+				s ..= ` gap {num_text(n.gap)}`
+			end
+			if n.padding ~= nil and n.padding ~= 0 then
+				s ..= ` pad {num_text(n.padding)}`
+			end
+		end
+		if n.__inst then
+			s ..= ` of "{flat(comp_names[n.__inst] or n.__inst, 30)}"`
+		elseif n.reusable == true then
+			s ..= " Component"
+		end
+		if n.type == "text" then
+			s ..= ` "{flat(n.content, 48)}" {num_text(n.fontSize or 14)}px`
+		end
+		local probs = Edit.problems_of(n, parent)
+		if #probs > 0 then
+			s ..= " !" .. table.concat(probs, ", !")
+		end
+		return s
+	end
+	local count_all
+	count_all = function(n: any): number
+		local c = 0
+		for _, k in (n.children or {}) do
+			c += 1 + count_all(k)
+		end
+		return c
+	end
+	local function go(n: any, parent: any?, level: number, is_start: boolean)
+		if #lines >= SUMMARY_LINES then
+			more += 1 + count_all(n)
+			return
+		end
+		local kids = n.children or {}
+		local s = line(n, parent, level)
+		-- an Instance's insides only when it's where the summary starts
+		local open = level < max_depth and (n.__inst == nil or is_start)
+		if #kids > 0 and not open then
+			s ..= ` [+{#kids}]`
+		end
+		table.insert(lines, s)
+		if open then
+			for _, c in kids do
+				go(c, n, level + 1, false)
+			end
+		end
+	end
+	local parent_of = nil
+	if id then
+		-- the start's parent, for where it sits
+		Resolve.walk(roots, function(n)
+			for _, c in (n.children or {}) do
+				if c.id == id then
+					parent_of = n
+				end
+			end
+			return parent_of == nil
+		end)
+	end
+	for _, r in raw do
+		go(r, parent_of, 0, true)
+	end
+	if more > 0 then
+		table.insert(lines, `… {more} more nodes: TreeSummary(id) of one of the nodes above`)
+	end
+	return table.concat(lines, "\n")
+end
+
+local COLOUR_KEYS = { fill = true, stroke = true, effect = true }
+
+-- Every colour (hex) and Token reference ("$name") in a value.
+local function paints(v: any, out: { string }, depth: number?)
+	if type(v) == "string" then
+		local c = U.color(v)
+		if c then
+			table.insert(out, c)
+		elseif Resolve.reference(v) then
+			table.insert(out, v)
+		end
+	elseif type(v) == "table" and (depth or 0) < 8 then
+		for k, x in v do
+			if k ~= "url" then
+				paints(x, out, (depth or 0) + 1)
+			end
+		end
+	end
+end
+
+local function same_value(a: any, b: any): boolean
+	if type(a) == "string" and type(b) == "string" then
+		local ca, cb = U.color(a), U.color(b)
+		if ca and cb then
+			return ca == cb
+		end
+		return string.lower(a) == string.lower(b)
+	end
+	return U.equal(a, b)
+end
+
+function M.find_by_style(draft: any, q: any, root: string?, raw_only: boolean): { string }
+	if type(q) == "string" then
+		q = { colour = q }
+	end
+	if type(q) ~= "table" or next(q) == nil then
+		draft:fail('FindByStyle takes what to match: FindByStyle({ fill = "#555555" }), FindByStyle("$muted"), FindByStyle({ type = "text", fontSize = 12 })')
+	end
+	local doc = draft.d.doc
+	local rraw = Resolve.new(doc, draft.d.view_theme)
+	rraw.keep_tokens = true
+	rraw.keep_disabled = true
+	local rres = Resolve.new(doc, draft.d.view_theme)
+	rres.keep_disabled = true
+	-- each query value: { token = name?, value = what it draws }
+	local want = {}
+	for k, v in q do
+		local key = if k == "color" then "colour" else k
+		local tok = if type(v) == "string" then Resolve.reference(v) else nil
+		local value = v
+		if tok then
+			local t = rres.tokens[tok]
+			if not t then
+				draft:fail(`FindByStyle: the Design has no Token "{tok}"`)
+			end
+			value = Resolve.value_in(t, rres.theme)
+		end
+		want[key] = { token = tok, value = value }
+	end
+	local resolved = {}
+	for _, n in rres:roots(doc) do
+		Resolve.walk({ n }, function(x)
+			resolved[x.id] = x
+			return true
+		end)
+	end
+	local function matches(n: any, d: any): boolean
+		for key, w in want do
+			if key == "type" then
+				if n.type ~= w.value then
+					return false
+				end
+				continue
+			end
+			local colourish = key == "colour" or COLOUR_KEYS[key]
+			if colourish then
+				local keys = if key == "colour" then { "fill", "stroke", "effect" } else { key }
+				local hit = false
+				for _, pk in keys do
+					local raw_p, res_p = {}, {}
+					paints(n[pk], raw_p)
+					paints(d and d[pk], res_p)
+					if w.token then
+						if table.find(raw_p, "$" .. w.token) then
+							hit = true
+						end
+					end
+					local c = U.color(w.value)
+					if not hit and c then
+						if raw_only then
+							hit = table.find(raw_p, c) ~= nil
+						else
+							hit = table.find(res_p, c) ~= nil
+						end
+					end
+					if hit then
+						break
+					end
+				end
+				if not hit then
+					return false
+				end
+			else
+				local rv = n[key]
+				if w.token and rv == "$" .. w.token then
+					continue
+				end
+				if raw_only and Resolve.refers(rv) then
+					return false
+				end
+				if not same_value(if d then d[key] else rv, w.value) then
+					return false
+				end
+			end
+		end
+		return true
+	end
+	local out = {}
+	local inside = root == nil
+	local found_root = root == nil
+	local function walk(n: any, under: boolean)
+		local here = under or n.id == root
+		if n.id == root then
+			found_root = true
+		end
+		if here and n.id ~= root and matches(n, resolved[n.id]) then
+			table.insert(out, n.id)
+		end
+		for _, c in (n.children or {}) do
+			walk(c, here)
+		end
+	end
+	for _, n in rraw:roots(doc) do
+		walk(n, inside)
+	end
+	if not found_root then
+		draft:missing(root)
+	end
+	return out
 end
 
 local function apply_edits(snippet: string, edits: any): (string?, string?)

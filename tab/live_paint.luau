@@ -116,6 +116,85 @@ function M.show(roots: any, id: string, key: string, file_paints: { any }, i: nu
 	return true
 end
 
+-- (N5) Many layers at once (Selection colors): `uses` = { { id, key, paints,
+-- i } } and one colour. One look-up of every root's items and one
+-- `set_live` a root, however many layers (`show` per layer cloned the
+-- root's paints at each). Shows at most `cap` uses (default 400). The
+-- number of layers shown.
+function M.show_many(roots: any, uses: { any }, hex: string, cap: number?): number
+	local color = M.scene_color(hex)
+	if not color then
+		return 0
+	end
+	local want: { [string]: { any } } = {}
+	local n = 0
+	for _, u in uses do
+		if n >= (cap or 400) then
+			break
+		end
+		local l = want[u.id]
+		if not l then
+			l = {}
+			want[u.id] = l
+		end
+		table.insert(l, u)
+		n += 1
+	end
+	local shown = 0
+	for ri, root in roots:peek() do
+		local patches: { [string]: any }? = nil
+		for _, it in root.nodes or {} do
+			local us = want[it.id]
+			if us then
+				local patch: any = {}
+				for _, u in us do
+					local at = M.scene_index(u.paints, u.i)
+					if u.key == "fill" then
+						if it.icon then
+							local icon = table.clone(it.icon)
+							icon.color = color
+							patch.icon = icon
+						else
+							patch.fill = with_paint(patch.fill or it.fill, at, color)
+						end
+					elseif u.key == "stroke" and type(it.stroke) == "table" then
+						local stroke = table.clone(patch.stroke or it.stroke)
+						stroke.fill = with_paint(stroke.fill, at, color)
+						patch.stroke = stroke
+					end
+				end
+				if next(patch) ~= nil then
+					patches = patches or {}
+					;(patches :: any)[it.id] = patch
+					shown += 1
+				end
+			end
+		end
+		if patches then
+			local held = roots:live_at(ri)
+			local paints: { [string]: any } = {}
+			if type(held) == "table" and held.paints and held.v == root.v then
+				paints = table.clone(held.paints)
+			end
+			for id, p in patches do
+				paints[id] = p
+			end
+			roots:set_live(ri, { paints = paints, v = root.v })
+		end
+	end
+	return shown
+end
+
+-- (N5) Takes every preview off the board.
+function M.clear_all(roots: any)
+	for ri in roots:peek() do
+		local held = roots:live_at(ri)
+		if type(held) == "table" and held.paints then
+			roots:set_live(ri, false)
+		end
+	end
+end
+
 -- Takes layer `id`'s preview off the board (an edit that didn't land).
 function M.clear(roots: any, id: string)
 	local ri, _, root = locate(roots, id)

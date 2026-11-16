@@ -9,6 +9,7 @@ local Resolve = require("./resolve")
 local Layout = require("./layout")
 local Text = require("./text")
 local Proto = require("./proto")
+local Variations = require("./variations")
 
 local M = {}
 
@@ -70,6 +71,12 @@ function M.draft(d: any): any
 		return true
 	end)
 	Proto.targets_in(d.doc.flows, self.linked)
+	-- (N2) versions waiting in a Variations set keep their ids taken
+	Variations.walk_stored(d.doc, function(n)
+		if type(n.id) == "string" then
+			self.ids[n.id] = true
+		end
+	end)
 	return self
 end
 
@@ -486,6 +493,25 @@ function D:set_prototype(p: any, merge: boolean?)
 	self.proto_touched = true
 end
 
+-- (N4) The Design's brief: a short text (palette, type, spacing, mood) the
+-- person and agents keep; "" or null clears it. Saved and undone with the doc.
+M.BRIEF_MAX = 4000
+function D:set_brief(text: any)
+	if text == nil or U.is_null(text) then
+		text = ""
+	end
+	if type(text) ~= "string" then
+		self:fail(`the brief is text, not {typeof(text)}`)
+	end
+	text = string.gsub(text, "^%s+", "")
+	text = string.gsub(text, "%s+$", "")
+	if #text > M.BRIEF_MAX then
+		self:fail(`the brief is at most {M.BRIEF_MAX} characters ({#text} given): keep it short (palette, type, spacing, mood)`)
+	end
+	self.d.doc.brief = if text ~= "" then text else nil
+	self.brief_changed = true
+end
+
 function D:attach(list: any, index: number?, node: any, made: { any })
 	local i = if index then math.clamp(math.floor(index) + 1, 1, #list + 1) else #list + 1
 	table.insert(list, i, node)
@@ -504,6 +530,7 @@ function D:insert(parent: string?, node: any): string
 	local made = {}
 	local built = self:prepare(node, "Insert", made)
 	self:attach(list, nil, built, made)
+	self:no_effect_tree(built, if parent then self:find(parent).node else nil)
 	return built.id
 end
 
@@ -639,6 +666,7 @@ function D:update(id: string, props: any, replace: boolean?)
 	end
 	self:set(f.node, props, "Update", replace)
 	self:changed_id(id)
+	self:no_effect(f.node, f.parent, props)
 end
 
 -- `card/title`: the override on the Instance `card`.
@@ -834,7 +862,8 @@ function D:copy(id: string, parent: string?, props: any?): string
 		local made = {}
 		local built = self:prepare(inst, "Copy", made)
 		self:attach(list, nil, built, made)
-		return built.id
+		self:no_effect(built, if parent then self:find(parent).node else nil, p2)
+		return built.id, { [id] = built.id }
 	end
 	if depth + height_of(src) > MAX_DEPTH then
 		self:fail(`Copy: nodes nest at most {MAX_DEPTH} deep`)
@@ -863,9 +892,13 @@ function D:copy(id: string, parent: string?, props: any?): string
 	self:set(src, p2, "Copy")
 	src.reusable = if is_inside(id) then nil else src.reusable
 	local made = {}
-	renew(self, src, made, {})
+	-- (N4) old id → new id for every node copied (Duplicate returns it;
+	-- inside an Instance the old ids are the slash ids it's read by)
+	local renamed = {}
+	renew(self, src, made, renamed)
 	self:attach(list, nil, src, made)
-	return src.id
+	self:no_effect(src, if parent then self:find(parent).node else nil, p2)
+	return src.id, renamed
 end
 
 function D:replace(id: string, node: any): string
@@ -1234,6 +1267,57 @@ local function inert(n: any): { string }?
 	return out
 end
 M.inert = inert
+
+-- (N4) Props a call set that do nothing where the node sits, as warnings
+-- ("… had no effect"): `keys` are the props the call gave, `parent` the
+-- node's parent (nil on the Canvas). Layout props on a Frame without a
+-- layout are check_values's (inert above).
+function D:no_effect(n: any, parent: any?, keys: any)
+	local function given(k: string): boolean
+		return keys[k] ~= nil and not U.is_null(keys[k])
+	end
+	local name = tostring(n.name)
+	local laid = parent and (parent.layout == "horizontal" or parent.layout == "vertical")
+	if laid and n.absolute ~= true then
+		local xy = {}
+		for _, k in { "x", "y" } do
+			if given(k) and keys[k] ~= 0 then
+				table.insert(xy, k)
+			end
+		end
+		if #xy > 0 then
+			self:warn(n.id, xy[1], `"{name}": {table.concat(xy, ", ")} had no effect: its parent "{tostring(parent.name)}" (layout = "{parent.layout}") places it. Set absolute = true to place it yourself, or drop them`)
+		end
+	elseif given("absolute") and keys.absolute == true and not laid then
+		self:warn(n.id, "absolute", `"{name}": absolute had no effect: {if parent then `its parent "{tostring(parent.name)}" has no layout` else "it's on the Canvas"}, so it's placed by x, y already`)
+	end
+	if n.type == "text" then
+		local g = n.textGrowth
+		if g == "auto" and (given("width") or given("height")) then
+			self:warn(n.id, "width", `"{name}": width/height had no effect with textGrowth = "auto" (the text sizes itself): use textGrowth = "fixed_width" to wrap at a width`)
+		elseif (g == "fixed_width" or g == "fixed-width") and given("height") then
+			self:warn(n.id, "height", `"{name}": height had no effect with textGrowth = "fixed_width" (the height follows the text): use "fixed_width_height" to fix it`)
+		end
+	end
+	if parent == nil and (n.type == "frame" or n.type == "instance") then
+		for _, k in { "width", "height" } do
+			if given(k) and keys[k] == "fill_container" then
+				self:warn(n.id, k, `"{name}": {k} = "fill_container" had no effect on the Canvas (no container): it sizes as fit_content; give a number`)
+			end
+		end
+	end
+end
+
+-- no_effect over a node just put in `parent` and what it holds (Insert).
+function D:no_effect_tree(n: any, parent: any?, depth: number?)
+	if (depth or 0) > MAX_DEPTH then
+		return
+	end
+	self:no_effect(n, parent, n)
+	for _, c in U.list(n.children) do
+		self:no_effect_tree(c, n, (depth or 0) + 1)
+	end
+end
 
 -- A laid-out node's problems as words: layout's, a box past a parent that
 -- doesn't clip, and layout props on a Frame without a layout.
@@ -1643,6 +1727,7 @@ function D:lint(roots: { any })
 			end
 		end
 	end
+	local near = self:near_misses(roots)
 	local function report(rule, list, what)
 		if #list == 0 then
 			return
@@ -1657,9 +1742,135 @@ function D:lint(roots: { any })
 	report("small-text", small, "texts under 12 px")
 	report("contrast", low, "texts with low contrast on their background")
 	report("raw-colour", raw, "raw hex colours where the Design has colour Tokens (use \"$name\")")
+	report("near-align", near, "near-misses in alignment, 1–4 px off a sibling's edge or centre (set the x/y given; lintIgnore = \"near-align\" if meant)")
+end
+
+-- (N4) Near-miss alignment: a layer this call touched, placed by its own
+-- x, y (its parent has no layout, or it's absolute), whose left / centre /
+-- right (top / middle / bottom) is 1–4 px off the same edge of a sibling
+-- within 200 px, while no edge of it lines up exactly with any sibling on
+-- that axis (one exact match says the offset is meant). Auto layout
+-- children are skipped: spacing places them. One hint per layer and axis.
+local NEAR_MIN, NEAR_MAX, NEAR_REACH = 1, 4, 200
+function D:near_misses(roots: { any }): { string }
+	local out = {}
+	local hot = {}
+	for _, id in self.changed_list do
+		local f = if is_inside(id) then nil else self:find(id)
+		local p = f and f.parent
+		-- only a layer placed by its own x, y, with a sibling
+		if p and (not (p.layout == "horizontal" or p.layout == "vertical") or f.node.absolute == true) and #(p.children or {}) >= 2 then
+			while f and f.parent do
+				f = self:find(f.parent.id)
+			end
+			if f then
+				hot[f.node.id] = true
+			end
+		end
+	end
+	local list = {}
+	for _, r in roots do
+		if hot[r.id] then
+			table.insert(list, r)
+		end
+	end
+	if #list == 0 then
+		return out
+	end
+	Layout.run(list)
+	local function muted(o: any): boolean
+		return o == true or (type(o) == "table" and o["near-align"] == true)
+	end
+	local EDGE = { { "left", "centre", "right" }, { "top", "middle", "bottom" } }
+	local function edges(b: any, axis: number): { number }
+		if axis == 1 then
+			return { b.x, b.x + b.w / 2, b.x + b.w }
+		end
+		return { b.y, b.y + b.h / 2, b.y + b.h }
+	end
+	local function round(v: number): string
+		local r = math.floor(v * 10 + 0.5) / 10
+		return if r == math.floor(r) then tostring(math.floor(r)) else tostring(r)
+	end
+	local function check(a: any, free: { any }, axis: number, pbox: any)
+		local ab = a.__box
+		local ae = edges(ab, axis)
+		local best, best_d, best_s, best_k = nil, math.huge, nil, nil
+		local before = true
+		for _, s in free do
+			if s == a then
+				before = false
+			else
+				local sb = s.__box
+				-- near on the other axis
+				local gap
+				if axis == 1 then
+					gap = math.max(sb.y - (ab.y + ab.h), ab.y - (sb.y + sb.h), 0)
+				else
+					gap = math.max(sb.x - (ab.x + ab.w), ab.x - (sb.x + sb.w), 0)
+				end
+				local se = edges(sb, axis)
+				for i = 1, 3 do
+					for j = 1, 3 do
+						if math.abs(se[j] - ae[i]) < NEAR_MIN then
+							return -- lines up with a sibling on this axis: meant
+						end
+					end
+				end
+				-- the target: a sibling this call left alone, or one before it
+				-- (two new layers off by 2 px: the later one gets the hint)
+				if gap <= NEAR_REACH and (before or not self.changed[s.id]) then
+					for k = 1, 3 do
+						local d = se[k] - ae[k]
+						if math.abs(d) >= NEAR_MIN and math.abs(d) <= NEAR_MAX + 0.01 and math.abs(d) < best_d then
+							best, best_d, best_s, best_k = d, math.abs(d), s, k
+						end
+					end
+				end
+			end
+		end
+		if best then
+			local key = if axis == 1 then "x" else "y"
+			local own = a[key]
+			local fix = if type(own) == "number" then `: {key} = {round(own + best)}` else ` (move it {round(best)} px)`
+			table.insert(out, `"{tostring(a.name)}" {EDGE[axis][best_k]} is {round(best_d)} px off "{tostring(best_s.name)}" {EDGE[axis][best_k]}{fix}`)
+		end
+	end
+	local function walk(n: any, off: any)
+		off = muted_rules(n, off)
+		if off == true then
+			return
+		end
+		local kids = n.children or {}
+		local laid = n.type == "frame" and (n.layout == "horizontal" or n.layout == "vertical")
+		local free = {}
+		for _, c in kids do
+			local b = c.__box
+			if b and b.w > 0 and b.h > 0 and (not laid or c.absolute == true) and U.num(c.rotation, 0) == 0 and c.enabled ~= false and not is_inside(c.id) then
+				table.insert(free, c)
+			end
+		end
+		if #free >= 2 and #free <= 80 then
+			for _, a in free do
+				if self.changed[a.id] and not muted(muted_rules(a, off)) then
+					check(a, free, 1, n.__box)
+					check(a, free, 2, n.__box)
+				end
+			end
+		end
+		for _, c in kids do
+			walk(c, off)
+		end
+	end
+	for _, r in list do
+		walk(r, nil)
+	end
+	return out
 end
 
 function D:finish()
+	-- (N2) a Variations set goes with its node
+	Variations.prune(self)
 	local r = Resolve.new(self.d.doc, self.d.view_theme)
 	local drawn = r:roots(self.d.doc)
 	if next(self.changed) ~= nil then

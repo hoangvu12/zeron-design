@@ -7,6 +7,7 @@
 local Draw = require("./draw")
 local Guard = require("./guard")
 local Roots = require("./roots")
+local History = require("./history") -- (N3)
 
 -- A `scene` answer's size, at most (its JSON; past it, `more`). An answer
 -- becomes Luau tables all at once, with no garbage collected meanwhile:
@@ -25,6 +26,27 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 	local ia_sel = ui.state(`design.{did}.ia_sel`, { key = "", list = {} } :: any)
 	ia_sel:set({ key = "", list = {} })
 	local flashes = ui.state(`design.{did}.flashes`, {} :: { any })
+	-- (N1) Agents' changes to animate on the overlay (canvas.luau's agent fx):
+	-- `{ { key, id, kind = "new"|"edit"|"delete"|"read", chat, at, box? } }`
+	-- (`box`, a deleted node's last canvas box). The Canvas drops each when done.
+	local agent_fx = ui.state(`design.{did}.agent_fx`, {} :: { any })
+	agent_fx:set({})
+	-- (N1) Agents present: `{ { chat, name, at, busy } }`, newest first; `at`
+	-- the last time each changed or read this Design (ui.now()), `busy` while
+	-- its snippet runs. Shell's title chip shows them.
+	local agents = ui.state(`design.{did}.agents`, {} :: { any })
+	agents:set({})
+	local fx_n = 0
+	local function seen_agent(chat: string?, busy: boolean?)
+		local key = chat or ""
+		local out = { { chat = chat, name = (if o.chat_title then o.chat_title(chat) else nil) or "Agent", at = ui.now(), busy = busy == true } }
+		for _, a in agents:peek() do
+			if (a.chat or "") ~= key then
+				table.insert(out, a)
+			end
+		end
+		agents:set(out)
+	end
 	local status = ui.state(`design.{did}.status`, "loading")
 	local version = 0
 	local pending_flash: { [number]: any } = {}
@@ -99,6 +121,44 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		end
 	end
 
+	-- (N4) The Design's brief (text, "" for none): every scene answer and
+	-- `changed` carries it; the panel with nothing selected edits it.
+	local brief = ui.state(`design.{did}.brief`, "")
+	brief:set("")
+	local function take_brief(b: any)
+		local t = if type(b) == "string" then b else ""
+		if brief:peek() ~= t then
+			brief:set(t)
+		end
+	end
+
+	-- (N2) Variations sets waiting for a pick: { [node id] = { current, count,
+	-- names, original } } (engine/variations.luau `summary`); the Canvas's
+	-- bar (tab/variations_bar.luau) flips them.
+	local variations = ui.state(`design.{did}.variations`, {} :: any)
+	variations:set({})
+	local function take_variations(v: any)
+		if type(v) ~= "table" then
+			v = {}
+		end
+		local cur = variations:peek()
+		local same = true
+		for k, s in v do
+			local c = cur[k]
+			if not c or c.current ~= s.current or c.count ~= s.count or table.concat(c.names or {}, "\0") ~= table.concat(s.names or {}, "\0") then
+				same = false
+			end
+		end
+		for k in cur do
+			if v[k] == nil then
+				same = false
+			end
+		end
+		if not same then
+			variations:set(v)
+		end
+	end
+
 	-- Roots from a `scene` answer put in place: one written at its index
 	-- (so the Canvas draws that Screen alone), the list rebuilt only when
 	-- the order or the set of roots changes.
@@ -112,6 +172,10 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 			take_flows(reply.flows)
 		end
 		take_proto(reply.prototype, reply.device)
+		take_brief(reply.brief)
+		if reply.variations ~= nil then
+			take_variations(reply.variations)
+		end
 		local list = roots:peek()
 		local at = index_of(list)
 		local order = reply.order
@@ -165,6 +229,15 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 				table.insert(l, { id = id, chat = f.chat, label = f.label, at = now })
 			end
 			flashes:set(l)
+			-- (N1) new and edited nodes animate as the board shows them
+			if f.fx and #f.fx > 0 then
+				local a = table.clone(agent_fx:peek())
+				for _, x in f.fx do
+					fx_n += 1
+					table.insert(a, { key = `{fx_n}`, id = x.id, kind = x.kind, chat = f.chat, at = now })
+				end
+				agent_fx:set(a)
+			end
 		end
 		if reply.more and #reply.more > 0 then
 			service:call("scene", { did = did, roots = reply.more, max_bytes = MAX_BYTES }):after(take, function(err: any)
@@ -214,16 +287,62 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		-- (Every `changed` carries the Design's flows when it has any.)
 		take_flows(e.flows)
 		take_proto(e.prototype, e.device)
+		take_brief(e.brief)
+		if e.variations ~= nil then
+			take_variations(e.variations)
+		end
 		local ids = {}
 		for id in e.roots or {} do
 			table.insert(ids, id)
 		end
-		if e.by == "agent" and e.flash and #e.flash > 0 then
+		-- (N1) new and edited nodes wait for their roots (above); deleted ones
+		-- animate now, at their last box in the roots still shown.
+		local later_fx = {}
+		if e.by == "agent" and type(e.fx) == "table" then
+			local gone: { [string]: boolean } = {}
+			local any_gone = false
+			for _, x in e.fx do
+				if x.kind == "delete" then
+					gone[x.id] = true
+					any_gone = true
+				else
+					table.insert(later_fx, x)
+				end
+			end
+			if any_gone then
+				local look_in: { [string]: boolean } = {}
+				for id in e.roots or {} do
+					look_in[id] = true
+				end
+				for _, id in e.removed or {} do
+					look_in[id] = true
+				end
+				local now = ui.now()
+				local a = table.clone(agent_fx:peek())
+				for _, r in roots:peek() do
+					if look_in[r.id] or gone[r.id] then
+						for _, it in r.nodes or {} do
+							-- (only the outermost: a deleted node's deleted parent covers it)
+							if gone[it.id] and not gone[it.p or ""] and it.box then
+								fx_n += 1
+								table.insert(a, { key = `{fx_n}`, id = it.id, kind = "delete", chat = e.chat, at = now, box = { it.box.x, it.box.y, it.box.w, it.box.h } })
+							end
+						end
+					end
+				end
+				agent_fx:set(a)
+			end
+		end
+		if e.by == "agent" and ((e.flash and #e.flash > 0) or #later_fx > 0) then
 			pending_flash[e.version] = {
-				ids = e.flash,
+				ids = e.flash or {},
+				fx = later_fx,
 				chat = e.chat,
 				label = if o.chat_title then o.chat_title(e.chat) else nil,
 			}
+		end
+		if e.by == "agent" then
+			seen_agent(e.chat, false)
 		end
 		if #ids == 0 and not e.removed and not e.order then
 			return
@@ -240,6 +359,27 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		end, function(err: any)
 			say(`scene: {err}`)
 		end)
+	end))
+
+	-- (N1) An agent's snippet running here (`working`), and the Screens it
+	-- screenshot (`read`): presence, and a pale wash over each read Screen.
+	table.insert(offs, service:on("working", function(e: any)
+		if type(e) == "table" and e.did == did then
+			seen_agent(e.chat, e.on == true)
+		end
+	end))
+	table.insert(offs, service:on("read", function(e: any)
+		if type(e) ~= "table" or e.did ~= did or type(e.roots) ~= "table" then
+			return
+		end
+		local now = ui.now()
+		local a = table.clone(agent_fx:peek())
+		for _, id in e.roots do
+			fx_n += 1
+			table.insert(a, { key = `{fx_n}`, id = id, kind = "read", chat = e.chat, at = now })
+		end
+		agent_fx:set(a)
+		seen_agent(e.chat, false)
 	end))
 
 	table.insert(offs, service:on("selection", function(e: any)
@@ -305,7 +445,7 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		end)
 	end
 
-	local source = { roots = roots, selection = selection, ia_sel = ia_sel, flashes = flashes, dark = o.dark, status = status, save = save, chat_title = o.chat_title, flows = flows, prototype = prototype, device = device }
+	local source = { roots = roots, selection = selection, ia_sel = ia_sel, flashes = flashes, agent_fx = agent_fx, agents = agents, dark = o.dark, status = status, save = save, chat_title = o.chat_title, flows = flows, prototype = prototype, device = device, brief = brief, variations = variations }
 
 	-- (step 4) A Screen resolved with Play's variant state ({ [instance id] =
 	-- member id }): its root as `scene` gives it, or nil.
@@ -421,6 +561,56 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		end)
 	end
 
+	-- (N3) The History tab's data (tab/history.luau): steps from `history`,
+	-- pictures kept with `history_thumb`, Undo to here with `undo_to`.
+	local history = History.new({
+		key = `design.{did}`,
+		roots = roots,
+		list = function(done: (r: any?) -> ())
+			service:call("history", { did = did }):after(function(r: any)
+				if not disposed then
+					done(r)
+				end
+			end, function(err: any)
+				say(`history: {err}`)
+			end)
+		end,
+		thumbs = function(seq: number, done: (t: any?) -> ())
+			service:call("history_thumbs", { did = did, seq = seq }):after(function(r: any)
+				done(if type(r) == "table" then r.thumbs else nil)
+			end, function()
+				done(nil)
+			end)
+		end,
+		put_thumb = function(seq: number, root: string, b: string?, a: string?)
+			service:call("history_thumb", { did = did, seq = seq, root = root, before = b, after = a }):after(function() end, function(err: any)
+				say(`history_thumb: {err}`)
+			end)
+		end,
+		undo_to = function(seq: number, keep: boolean, expect: number?, done: (ok: boolean, err: any?) -> ())
+			local t = begin()
+			service:call("undo_to", { did = did, seq = seq, keep = keep, expect = expect }):after(function()
+				landed(t)
+				done(true)
+			end, function(err: any)
+				landed(t)
+				say(tostring(err))
+				done(false, err)
+			end)
+		end,
+	})
+	table.insert(offs, service:on("changed", function(e: any)
+		if type(e) == "table" and e.did == did then
+			history.changed(e)
+		end
+	end))
+	table.insert(offs, service:on("history", function(e: any)
+		if type(e) == "table" and e.did == did then
+			history.refresh()
+		end
+	end))
+	source.history = history
+
 	source.reload = load
 	source.name = o.name
 	source.did = did
@@ -500,8 +690,18 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		end)
 	end
 
+	-- (N5) Selection colors: the paints of the layers and all inside them.
+	function source.paints(ids: { string }, done: (r: any?) -> ())
+		service:call("paints", { did = did, ids = ids }):after(function(r: any)
+			done(if type(r) == "table" then r else nil)
+		end, function(err: any)
+			say(`paints: {err}`)
+			done(nil)
+		end)
+	end
+
 	function source.tokens(done: (t: any) -> ())
-		service:call("tokens", { did = did }):after(done, function(err: any)
+		service:call("tokens",{ did = did }):after(done, function(err: any)
 			say(`tokens: {err}`)
 		end)
 	end
@@ -609,6 +809,8 @@ return function(zeron: any, did: string, opts: { dark: any?, log: ((string) -> (
 		roots:set({})
 		tree:set({})
 		flashes:set({})
+		agent_fx:set({})
+		agents:set({})
 		last_changed:set(nil)
 		comments:set({})
 	end

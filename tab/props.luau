@@ -23,6 +23,9 @@ local Layers = require("./layers")
 local Picker = require("./picker")
 local Bind = require("./bind")
 local LivePaint = require("./live_paint")
+local SelColors = require("./sel_colors")
+-- (N5) Selection colors: the latest `paints` asked (older answers dropped)
+local paints_asked = 0
 
 local Pdf = require("./pdf")
 
@@ -529,6 +532,50 @@ function M.Props(props: PropsProps): Node
 				if props.on_toggle then sq("panelRight", "Hide properties", props.on_toggle :: any) else ui.div {},
 			},
 			ui.div { px = 12, pb = 16, Kit.text(L, "Select a layer to see its properties.", { color = L.muted }) },
+			-- (N4) The Design's brief: palette, type, spacing, mood. Agents read
+			-- it first (design_state) and keep it current (SetBrief); saved on blur.
+			if source.brief then ui.column {
+				w_full = true,
+				px = 12,
+				pb = 16,
+				gap = 6,
+				Kit.text(L, "Brief", { weight = 500, color = L.fg }),
+				ui.textarea {
+					id = "design-brief",
+					label = "Design brief",
+					w_full = true,
+					h = 120,
+					value = function(): string
+						return source.brief:get() or ""
+					end,
+					placeholder = "Palette, type, spacing, mood. Agents read this first and keep it up to date.",
+					placeholder_color = L.faint,
+					on_commit = function(t: string)
+						t = string.gsub(string.gsub(t, "^%s+", ""), "%s+$", "")
+						if #t > 4000 then -- (engine/edit.luau BRIEF_MAX, in bytes; cut on a whole character)
+							local cut = 4000
+							while cut > 0 and utf8.len(string.sub(t, 1, cut)) == nil do
+								cut -= 1
+							end
+							t = string.sub(t, 1, cut)
+						end
+						if t ~= (source.brief:peek() or "") then
+							source.brief:set(t)
+							source.edit({ { op = "brief", text = t } }, "Brief")
+						end
+					end,
+					wrap = true,
+					px = 10,
+					py = 7,
+					rounded = 8,
+					border = 0,
+					bg = L.field,
+					focus = { outline = 1, outline_color = L.accent, bg = L.field_active },
+					text_size = 12,
+					font = Look.UI,
+					color = L.fg,
+				},
+			} else ui.div {},
 		}
 	end
 
@@ -1840,6 +1887,254 @@ function M.Props(props: PropsProps): Node
 		})
 	end
 
+	-- (N5) Selection colors, as Figma's: every colour the selected layers and
+	-- what's inside them use (SelColors), most used first, a Token by its
+	-- name. Shown for more than one layer (several selected, or a frame with
+	-- layers inside). A row's picker changes the colour on every layer using
+	-- it: live on the board while a knob moves (LivePaint.show_many), one edit
+	-- on release (one undo step). A Token's row: pick another Token (swaps
+	-- it), Detach (its colour as a hex), or move a knob and choose on
+	-- release: change the Token itself (the whole Design) or detach these
+	-- layers with the new colour.
+	local SHOW_FIRST = 8 -- rows before "See all"
+	local SHOW_MAX = 60 -- rows at most
+	local LIVE_CAP = 400 -- layers previewed live
+	local function selection_colors(): Node?
+		if not source.paints or #ids_l == 0 then
+			return nil
+		end
+		return ui.component(function(): Node
+			local data = ui.use_state(nil :: any)
+			local all_on = ui.use_state(false)
+			-- (bumped to build the rows again: a cancelled Token choice's row
+			-- shows its colour again, not the knob's)
+			local nonce = ui.use_state(0)
+			ui.effect(function()
+				local _ = if source.roots then source.roots:get() else nil
+				paints_asked += 1
+				local mine = paints_asked
+				source.paints(ids_l, function(r: any?)
+					if mine ~= paints_asked or type(r) ~= "table" or type(r.layers) ~= "table" then
+						return
+					end
+					local by = {}
+					for _, l in r.layers do
+						by[l.id] = l
+					end
+					local entries = SelColors.collect(r.layers)
+					local parts = {}
+					for _, e in entries do
+						table.insert(parts, `{e.key}:{e.count}`)
+					end
+					data:set({ entries = entries, by = by, n = #r.layers, more = r.more == true, stamp = table.concat(parts, ",") })
+				end)
+			end)
+			return ui.presence(function(): string
+				local d = data:get()
+				if not d or d.n < 2 or #d.entries == 0 then
+					return ""
+				end
+				return d.stamp .. (if all_on:get() then "|all" else "") .. "#" .. tostring(nonce:get())
+			end, function(stamp: string): Node
+				if stamp == "" then
+					return ui.div {}
+				end
+				local d = data:peek()
+				local rows: { Node } = {}
+				local shown_n = if all_on:peek() then math.min(#d.entries, SHOW_MAX) else math.min(#d.entries, SHOW_FIRST)
+				for i = 1, shown_n do
+					local e = d.entries[i]
+					local pending = ui.use_state(nil :: string?)
+					local function live_uses(): { any }
+						local uses = {}
+						for _, id in e.ids do
+							local l = d.by[id]
+							if l then
+								for _, u in SelColors.live_uses(l, e.key) do
+									table.insert(uses, { id = id, key = u.key, i = u.i, paints = u.paints })
+								end
+							end
+						end
+						return uses
+					end
+					local function unpreview()
+						if source.roots then
+							LivePaint.clear_all(source.roots)
+						end
+					end
+					-- Every layer using it, `new` in its place: one edit.
+					local function recolor(new: string, label: string)
+						local ops = {}
+						for _, id in e.ids do
+							local l = d.by[id]
+							local p = l and SelColors.swap(l, e.key, new)
+							if p then
+								table.insert(ops, { op = "update", id = id, props = p })
+							end
+						end
+						if #ops == 0 or SelColors.key(new) == e.key then
+							unpreview()
+							return
+						end
+						source.edit(ops, label, { done = function(ok: boolean)
+							if not ok then
+								unpreview()
+							end
+						end })
+					end
+					local function change_token(hex: string)
+						local name = e.token :: string
+						local t = tokens[name]
+						if type(t) ~= "table" then
+							return
+						end
+						local nt = deep(t)
+						if type(nt.value) == "table" and nt.value[1] ~= nil then
+							-- (the value the panel shows: the first, as `resolve`)
+							nt.value[1].value = hex
+						else
+							nt.value = hex
+						end
+						source.edit({ { op = "tokens", tokens = { [name] = nt } } }, "Change variable", { done = function(ok: boolean)
+							if not ok then
+								unpreview()
+							end
+						end })
+					end
+					local function commit(np: any, live: boolean)
+						if type(np) ~= "string" then
+							return
+						end
+						local hexy = string.sub(np, 1, 1) == "#"
+						if live then
+							if hexy and source.roots then
+								LivePaint.show_many(source.roots, live_uses(), np, LIVE_CAP)
+							end
+							return
+						end
+						if e.token and hexy then
+							-- a Token's colour moved: the person picks what it changes
+							if np == resolve(e.value) then
+								-- (Detach: the Token's own colour, as a hex)
+								recolor(np, "Detach variable")
+							else
+								pending:set(np)
+							end
+							return
+						end
+						recolor(np, if string.sub(np, 1, 1) == "$" then "Apply variable" else "Change selection colour")
+					end
+					local count_btn = ui.button {
+						id = `selcolor-count-{i}`,
+						label = `Select the {e.count} layers using it`,
+						tooltip = `{e.count} {if e.count == 1 then "layer uses" else "layers use"} it · click to select`,
+						h = 24,
+						min_w = 24,
+						px = 6,
+						shrink = 0,
+						rounded = 6,
+						border = 0,
+						bg = CLEAR,
+						hover = { bg = L.hover },
+						items = "center",
+						justify = "center",
+						on_click = function()
+							if props.select then
+								props.select(e.ids)
+							end
+						end,
+						Kit.text(L, tostring(e.count), { color = L.faint }),
+					}
+					local row_node = ui.row {
+						w_full = true,
+						h = 28,
+						items = "center",
+						gap = 6,
+						ui.div { grow = 1, min_w = 0, color_field({ id = `selcolor-{i}`, title = "Selection", paint = e.value, solid_only = true, commit = commit }) },
+						count_btn,
+					}
+					if not e.token then
+						table.insert(rows, row_node)
+					else
+						-- (the choice under its row, in one column: no gap while it's closed)
+						table.insert(
+							rows,
+							ui.column {
+								w_full = true,
+								row_node,
+								ui.presence(function(): string
+								return pending:get() or ""
+							end, function(hex: string): Node
+								if hex == "" then
+									return ui.div {}
+								end
+								return ui.column {
+									w_full = true,
+									pt = 8,
+									gap = 6,
+									-- (the variable for the whole Design, or these layers off it)
+									ui.text {
+										`Apply {string.upper(string.sub(hex, 2))} to:`,
+										text_size = 12,
+										color = L.muted,
+										font = Look.UI,
+										w_full = true,
+										min_w = 0,
+									},
+									ui.row {
+										w_full = true,
+										gap = 6,
+										wide_btn(`selcolor-token-{i}`, "Change variable", nil, function()
+											pending:set(nil)
+											change_token(hex)
+											-- (the row's keys don't change: build it again so its
+											-- swatch shows the Token, not the knob)
+											nonce:set(nonce:peek() + 1)
+										end),
+										wide_btn(`selcolor-detach-{i}`, `Detach {e.count}`, nil, function()
+											pending:set(nil)
+											recolor(hex, "Detach and change colour")
+										end),
+										mini("x", "Cancel", function()
+											pending:set(nil)
+											unpreview()
+											nonce:set(nonce:peek() + 1)
+										end),
+									},
+								}
+							end, { w_full = true }),
+							}
+						)
+					end
+				end
+				if #d.entries > SHOW_FIRST then
+					local label = if all_on:peek() then "Show fewer" else `See all {#d.entries} colors`
+					table.insert(rows, ui.button {
+						id = "selcolor-all",
+						label = label,
+						h = 20,
+						p = 0,
+						border = 0,
+						bg = CLEAR,
+						hover = { bg = CLEAR },
+						items = "center",
+						on_click = function()
+							all_on:set(not all_on:peek())
+						end,
+						Kit.text(L, label, { color = L.accent_fg }),
+					})
+				end
+				if all_on:peek() and #d.entries > SHOW_MAX then
+					table.insert(rows, Kit.text(L, `{#d.entries - SHOW_MAX} rarer colors not listed`, { color = L.faint }))
+				end
+				if d.more then
+					table.insert(rows, Kit.text(L, `Counted the first {d.n} layers`, { color = L.faint }))
+				end
+				return sec("Selection colors", nil, rows, { id = "sec-selection-colors" })
+			end, { w_full = true })
+		end)({})
+	end
+
 	-- Paints: Fill and Stroke ------------------------------------------------------------------
 	local function paint_rows(title: string, key: string, get: (s: any) -> any, put: (s: any, v: any) -> { [string]: any }): ({ Node }, boolean)
 		local list, mixed = shared(function(s)
@@ -2016,6 +2311,9 @@ function M.Props(props: PropsProps): Node
 		end
 		add(sec("Stroke", { add_paint("Stroke", get, put, "#000000") }, rows))
 	end
+
+	-- (N5) Selection colors -----------------------------------------------------------------
+	add(selection_colors())
 
 	-- Typography -------------------------------------------------------------------------------
 	if all(function(s)

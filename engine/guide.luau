@@ -29,12 +29,22 @@ local function mark(key: string)
 	end
 end
 
+-- (N4) Keyed by the guide's version too: a chat that had an older version
+-- gets the new one once, with its first result after the update.
+local function key_of(chat: string?): string
+	local v = Text.VERSION or 1
+	local k = chat or "none"
+	return if v > 1 then `{k}@v{v}` else k
+end
+
 function M.first(chat: string?, result: any): any
-	local key = chat or "none"
+	local key = key_of(chat)
 	if not was_given(key) then
+		local had_older = (Text.VERSION or 1) > 1 and was_given(chat or "none")
 		mark(key)
 		result.guide = Text.CORE
-		result.guide_note = "This is the core guide, given once per chat. design_guide gives topic guides: " .. table.concat(Text.ORDER, ", ")
+		result.guide_note = (if had_older then `The core guide changed (now version {Text.VERSION}): read it again. ` else "This is the core guide, given once per chat. ")
+			.. "design_guide gives topic guides: " .. table.concat(Text.ORDER, ", ")
 	end
 	return result
 end
@@ -42,7 +52,7 @@ end
 function M.topic(name: any, chat: string?): any
 	if name == nil or name == "" or name == "core" then
 		-- The chat has the core guide now: design_* calls don't send it again.
-		mark(chat or "none")
+		mark(key_of(chat))
 		return { guide = Text.CORE, topics = Text.ORDER }
 	end
 	local t = Text.TOPICS[name]

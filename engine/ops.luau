@@ -6,6 +6,7 @@ local U = require("./util")
 local Resolve = require("./resolve")
 local Edit = require("./edit")
 local Expr = require("./expr")
+local Variations = require("./variations") -- (N2)
 
 local M = {}
 
@@ -248,6 +249,27 @@ end
 -- ("__null" or {} clears; `merge = true` changes only the keys given).
 function RUN.prototype(draft, op)
 	draft:set_prototype(op.prototype, op.merge == true)
+end
+
+-- (N2) The Variations bar: { id, show = index } flips (no undo step: the
+-- service commits it quietly), { id, keep = index | true } keeps one (the
+-- shown one for true) and drops the rest, { id, discard = true } goes back
+-- to the original.
+function RUN.variation(draft, op)
+	if op.discard == true then
+		Variations.discard(draft, op.id)
+	elseif op.keep ~= nil then
+		Variations.keep(draft, op.id, if op.keep == true then nil else op.keep)
+	elseif op.show ~= nil then
+		Variations.show(draft, op.id, op.show)
+	else
+		draft:fail("variation needs show, keep or discard")
+	end
+end
+
+-- (N4) The Design's brief, as the person types it in the tab ("" clears).
+function RUN.brief(draft, op)
+	draft:set_brief(op.text)
 end
 
 function RUN.themes(draft, op)

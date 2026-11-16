@@ -21,7 +21,10 @@ local SCHEMA = [[
 CREATE TABLE IF NOT EXISTS designs (did TEXT PRIMARY KEY, name TEXT, doc TEXT, meta TEXT, version INTEGER, created INTEGER, updated INTEGER, opened INTEGER, source TEXT);
 CREATE TABLE IF NOT EXISTS steps (did TEXT, seq INTEGER, label TEXT, by TEXT, chat TEXT, at INTEGER, undo TEXT, redo TEXT, done INTEGER, PRIMARY KEY (did, seq));
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS hist (did TEXT, seq INTEGER, roots TEXT, thumbs TEXT, PRIMARY KEY (did, seq));
 ]]
+-- (N3 history) `hist`: per step, the roots it holds (`roots`, a JSON list)
+-- and small before/after pictures of them (`thumbs`, engine/history.luau).
 
 local ready = false
 -- The schema, made on first use: inside a call or tool, where awaiting
@@ -40,6 +43,9 @@ local function query(sql: string, params: any?): { any }
 	schema()
 	return zeron.db.query(sql, params):await()
 end
+
+-- (history, engine/history.luau) the same database, schema made first
+M.sql = { exec = exec, query = query }
 
 function M.init(z: any)
 	zeron = z
@@ -83,11 +89,14 @@ local function parts(d: any): any
 	end
 	local rest = {}
 	for k, v in d.doc do
-		if k ~= "children" then
+		if k ~= "children" and k ~= "variations" then
 			rest[k] = v
 		end
 	end
-	return { roots = roots, order = order, rest = json.encode(rest) }
+	-- (N2) Variations' stored versions: a part of their own, so a change to
+	-- them redraws only the roots that changed ("" = none)
+	local vars = if type(d.doc.variations) == "table" and next(d.doc.variations) ~= nil then json.encode(d.doc.variations) else ""
+	return { roots = roots, order = order, rest = json.encode(rest), vars = vars }
 end
 
 local function hold(row: any): any
@@ -187,6 +196,7 @@ end
 function M.delete(did: string)
 	exec("DELETE FROM designs WHERE did = ?", { did })
 	exec("DELETE FROM steps WHERE did = ?", { did })
+	exec("DELETE FROM hist WHERE did = ?", { did })
 	live[did] = nil
 end
 
@@ -359,10 +369,15 @@ local function between(a: any, b: any): (any?, { string })
 		end
 	end
 	local rest = if not same_json(a.rest, b.rest) then a.rest else nil
-	if not any and same_order and rest == nil then
+	local av, bv = a.vars or "", b.vars or ""
+	local vars = nil
+	if av ~= bv and (av == "" or bv == "" or not same_json(av, bv)) then
+		vars = av
+	end
+	if not any and same_order and rest == nil and vars == nil then
 		return nil, changed
 	end
-	return { order = a.order, nodes = nodes, rest = rest }, changed
+	return { order = a.order, nodes = nodes, rest = rest, vars = vars }, changed
 end
 
 -- Puts a step's state onto `d`; the roots it set.
@@ -390,14 +405,22 @@ local function apply(d: any, step: any): { string }
 	local doc = { children = children }
 	if step.rest then
 		for k, v in json.decode(step.rest) do
-			doc[k] = v
-		end
-	else
-		for k, v in d.doc do
-			if k ~= "children" then
+			if k ~= "variations" then
 				doc[k] = v
 			end
 		end
+	else
+		for k, v in d.doc do
+			if k ~= "children" and k ~= "variations" then
+				doc[k] = v
+			end
+		end
+	end
+	-- (N2) the step's Variations when it holds them, else the ones now
+	if step.vars ~= nil then
+		doc.variations = if step.vars == "" then nil else json.decode(step.vars)
+	else
+		doc.variations = d.doc.variations
 	end
 	d.doc = doc
 	return set
@@ -407,7 +430,10 @@ end
 -- Returns { version, roots = {id → v}, removed, order? } or nil when
 -- nothing changed. `join`: merge into the latest step when its label is
 -- the same (a run of keystrokes).
-function M.commit(d: any, label: string, by: string, chat: string?, join: boolean?): any?
+-- `quiet` (N2, flipping through Variations): saved and sent like any change,
+-- but no undo step (the step that made the set holds it; History shows one
+-- row).
+function M.commit(d: any, label: string, by: string, chat: string?, join: boolean?, quiet: boolean?): any?
 	d.dirty_all = true
 	local after = parts(d)
 	d.dirty_all = nil
@@ -432,10 +458,39 @@ function M.commit(d: any, label: string, by: string, chat: string?, join: boolea
 	-- The held state is the new one before anything awaits: another call
 	-- runs while this one waits on the db, and a failing one rolls back to
 	-- d.before (which must already hold this commit, or its nodes vanish).
+	local old_parts = d.before
 	d.before = after
+	local step_seq, touched = nil, nil
+	-- (history) the roots a step holds, with their names (a deleted one's
+	-- from its JSON before the change)
+	local function named(ids: { string }): string
+		local by = {}
+		for _, n in d.doc.children do
+			by[n.id] = n.name
+		end
+		local out = {}
+		for _, id in ids do
+			local nm = by[id]
+			if nm == nil and old_parts.roots[id] then
+				local ok, n = pcall(json.decode, old_parts.roots[id])
+				if ok and type(n) == "table" then
+					nm = n.name
+				end
+			end
+			table.insert(out, { id = id, name = nm })
+		end
+		return json.encode(out)
+	end
 	locked(d, function()
+	if quiet then
+		save(d)
+		return
+	end
 	exec("DELETE FROM steps WHERE did = ? AND done = 0", { d.did })
 	local latest = query("SELECT seq, label, undo FROM steps WHERE did = ? AND done = 1 ORDER BY seq DESC LIMIT 1", { d.did })[1]
+	-- (history) the redo branch just dropped: its rows go too (a seq is
+	-- taken again by the step made now)
+	exec("DELETE FROM hist WHERE did = ? AND seq > ?", { d.did, if latest then latest.seq else 0 })
 	if join and latest and latest.label == label then
 		local old = json.decode(latest.undo)
 		for id, j in undo.nodes do
@@ -444,16 +499,26 @@ function M.commit(d: any, label: string, by: string, chat: string?, join: boolea
 			end
 		end
 		old.rest = old.rest or undo.rest
+		if old.vars == nil then
+			old.vars = undo.vars
+		end
 		-- redo puts back the state now, for every root the merged step holds
-		redo = { order = after.order, nodes = {}, rest = if old.rest then after.rest else nil }
+		redo = { order = after.order, nodes = {}, rest = if old.rest then after.rest else nil, vars = if old.vars ~= nil then after.vars else nil }
 		for id in old.nodes do
 			redo.nodes[id] = after.roots[id] or false
 		end
 		exec("UPDATE steps SET undo = ?, redo = ?, at = ? WHERE did = ? AND seq = ?", { json.encode(old), json.encode(redo), M.now(), d.did, latest.seq })
+		step_seq = latest.seq
+		touched = M.step_roots(old)
+		exec("INSERT INTO hist (did, seq, roots) VALUES (?, ?, ?) ON CONFLICT(did, seq) DO UPDATE SET roots = excluded.roots", { d.did, step_seq, named(touched) })
 	else
 		local seq = if latest then latest.seq + 1 else 1
 		exec("INSERT INTO steps (did, seq, label, by, chat, at, undo, redo, done) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)", { d.did, seq, label, by, chat or "", M.now(), json.encode(undo), json.encode(redo) })
+		step_seq = seq
+		touched = M.step_roots(undo)
+		exec("INSERT OR REPLACE INTO hist (did, seq, roots) VALUES (?, ?, ?)", { d.did, seq, named(touched) })
 		exec("DELETE FROM steps WHERE did = ? AND seq <= ?", { d.did, seq - MAX_STEPS })
+		exec("DELETE FROM hist WHERE did = ? AND seq <= ?", { d.did, seq - MAX_STEPS })
 		-- And by size: every Design shares the plugin's one 100 MB database,
 		-- so a big Design's history keeps its newest STEPS_BYTES (the step
 		-- just made always stays).
@@ -472,7 +537,26 @@ function M.commit(d: any, label: string, by: string, chat: string?, join: boolea
 			end
 		end
 	end
-	return { version = d.version, roots = roots, removed = if #removed > 0 then removed else nil, order = if order_changed then after.order else nil }
+	return { version = d.version, roots = roots, removed = if #removed > 0 then removed else nil, order = if order_changed then after.order else nil, seq = step_seq, touched = touched }
+end
+
+-- (history) The roots a step's undo holds, in the Design's order (those
+-- gone after it last): what that step changed, made or deleted.
+function M.step_roots(step: any): { string }
+	local out, seen = {}, {}
+	for _, id in U.list(step.order) do
+		if step.nodes[id] ~= nil and not seen[id] then
+			seen[id] = true
+			table.insert(out, id)
+		end
+	end
+	for id in step.nodes do
+		if not seen[id] then
+			seen[id] = true
+			table.insert(out, id)
+		end
+	end
+	return out
 end
 
 
@@ -484,6 +568,9 @@ function M.rollback(d: any)
 	end
 	for _, id in d.before.order do
 		table.insert(doc.children, json.decode(d.before.roots[id]))
+	end
+	if (d.before.vars or "") ~= "" then
+		doc.variations = json.decode(d.before.vars)
 	end
 	d.doc = doc
 end

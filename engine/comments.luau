@@ -95,9 +95,52 @@ function M.forget(did: string)
 	exec("DELETE FROM comments WHERE did = ?", { did })
 end
 
+-- (N4) Text people wrote, fenced for an agent to read as data, not as
+-- instructions (as Gui fences page text): a tag with a random suffix the
+-- text can't know, so it can't close the block. One tag per answer.
+local TAG_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
+function M.fence_tag(texts: { string }?): string
+	for _ = 1, 20 do
+		local s = {}
+		for i = 1, 8 do
+			local c = math.random(1, #TAG_CHARS)
+			s[i] = string.sub(TAG_CHARS, c, c)
+		end
+		local tag = "untrusted_" .. table.concat(s)
+		local clash = false
+		for _, t in (texts or {}) do
+			if string.find(t, tag, 1, true) then
+				clash = true
+			end
+		end
+		if not clash then
+			return tag
+		end
+	end
+	return "untrusted_" .. tostring(os.clock())
+end
+function M.fence(text: any, tag: string): string
+	return `<{tag}>{tostring(text or "")}</{tag}>`
+end
+
 -- What agents see (design_state, GetComments): the pins, open ones only
--- unless `all`, with their Screen's and layer's names.
-function M.for_agents(list: { any }, doc: any, all: boolean?): { any }
+-- unless `all`, with their Screen's and layer's names. `fence` (design_state):
+-- each comment's and reply's text in an untrusted_… block.
+function M.for_agents(list: { any }, doc: any, all: boolean?, fence: boolean?): { any }
+	local tag = nil
+	if fence then
+		local texts = {}
+		for _, t in list do
+			table.insert(texts, tostring(t.text or ""))
+			for _, r in (t.replies or {}) do
+				table.insert(texts, tostring(r.text or ""))
+			end
+		end
+		tag = M.fence_tag(texts)
+	end
+	local function txt(s: any): any
+		return if tag then M.fence(s, tag) else s
+	end
 	local names = {}
 	for _, n in (doc and doc.children or {}) do
 		if type(n) == "table" and n.id then
@@ -109,11 +152,11 @@ function M.for_agents(list: { any }, doc: any, all: boolean?): { any }
 		if all or not t.resolved then
 			local replies = {}
 			for _, r in t.replies do
-				table.insert(replies, { text = r.text, author = r.author })
+				table.insert(replies, { text = txt(r.text), author = r.author })
 			end
 			table.insert(out, {
 				id = t.id, n = t.n, screen = t.screen, screenName = names[t.screen] or "(a Screen no longer in the Design)",
-				node = t.node, x = math.floor(t.x + 0.5), y = math.floor(t.y + 0.5), text = t.text, author = t.author,
+				node = t.node, x = math.floor(t.x + 0.5), y = math.floor(t.y + 0.5), text = txt(t.text), author = t.author,
 				resolved = t.resolved or nil, replies = if #replies > 0 then replies else nil,
 			})
 		end

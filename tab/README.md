@@ -11,6 +11,8 @@
 | `picker.luau` | The paint picker: Solid (spectrum, hue, alpha, hex, %, variables), Gradient (type, angle, stops), Image (URL, mode). |
 | `kit.luau`, `look.luau`, `icon_paths.luau` | Small parts at pen's metrics, pen's light/dark colours, the panel icons (from port/web/ui.js). |
 | `service_source.luau` | The Canvas's source over the service (`scene`, `changed`, `selection`, `edit`, `undo`, `redo`, `select`). |
+| `agent_fx.luau` | (N1) An agent's changes animated over the board, Paper-style (`pure/anim/n1/README.md`): reveal sweep + staggered child outlines + ring for new nodes, tint for edits, ghost for deletes, a wash for reads, blinking dots on Screens in progress. Small elements animated by `anime` in Rust, only while on screen; `reduce` = "Reduce agent animations". |
+| `variations_bar.luau` | (N2) The Variations bar (`pure/anim/n2/README.md`): under a node an agent made versions of, "2 of 5 · name ‹ › Use this ×"; ← → when focused, Enter = Use this. Sends `variation` ops (show: no undo step; keep / discard: one each). Mounted by `shell.luau` over the Canvas, as the comment pins (inside the Canvas the board keeps the pointer, so its buttons would get no click). |
 | `fixture_source.luau` | The same over a fixture, applying ops locally (no layout), for the harness. |
 | `render.luau` | `render` events → `ui.render_canvas` → `render_done`. |
 | `proto.luau` | Prototyping's shared reading of the scene (`ia`, `st`, `sttr`; spec `pure/anim/proto-step1-spec.md`): drivers and their hover/press looks, Play's hit test, each transition's motion and its reverse, eases as anime's `cubicBezier`. Pure. |

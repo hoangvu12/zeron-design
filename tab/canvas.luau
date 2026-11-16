@@ -33,6 +33,8 @@ local Noodles = require("./noodles")
 local IaClip = require("./ia_clip")
 local Toast = require("./toast")
 local Kit = require("./kit")
+local AgentFx = require("./agent_fx")
+local Spacing = require("./spacing") -- (N7) gap/padding handles
 
 local ZOOM_MIN, ZOOM_MAX = 0.02, 25
 local BOARD_STEP = 256
@@ -143,6 +145,9 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 	-- the board's moved by it, so a move translates what's drawn (zgx #2100)
 	-- and draws nothing again.
 	local lift_offset = ui.use_state({ dx = 0, dy = 0 })
+	-- (N7) Spacing handles: what's under the pointer in the selected auto
+	-- layout frame (`{ id, part, grab }`), and the functions (one local).
+	local SP: any = { hover = ui.use_state(nil :: any) }
 	local space = false
 	local drag: Drag? = nil
 	local field = ui.ref()
@@ -1624,6 +1629,8 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			end
 			hold_shown(sh0)
 			send(ops, "Resize")
+		elseif d.kind == "spacing" then
+			SP.finish(d, sh0)
 		elseif d.kind == "rotate" and d.moved and d.rotation ~= nil then
 			local id = d.ids[1]
 			local n = i.by[id]
@@ -1711,6 +1718,120 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 	-- properties show the Prototype tab.
 	local function proto_on(): boolean
 		return props.proto ~= nil and (props.proto :: any)()
+	end
+
+	-- (N7) Spacing handles (spacing.luau). The selected auto layout frame
+	-- under tab point (lx, ly): its geometry, the zone there, whether on a
+	-- handle.
+	function SP.at(lx: number, ly: number): (any?, any?, boolean)
+		local v = view:peek()
+		local s = sel()
+		if not v or #s ~= 1 or editing:peek() or space or tool:peek() ~= "move" or proto_on() then
+			return nil, nil, false
+		end
+		local g = Spacing.geom(ix:peek(), s[1])
+		if not g then
+			return nil, nil, false
+		end
+		local cx, cy = to_canvas(lx, ly)
+		local b = g.b
+		if cx < b[1] or cy < b[2] or cx > b[1] + b[3] or cy > b[2] + b[4] then
+			return nil, nil, false
+		end
+		local z, grab = Spacing.hit(Spacing.zones(g, v.zoom), cx, cy, v.zoom)
+		return g, z, grab and z ~= nil and not z.auto
+	end
+	-- Hover: which zone shows; the cursor on a handle. True when on one.
+	function SP.hover_at(lx: number, ly: number): boolean
+		local g, z, grab = SP.at(lx, ly)
+		local now = if g then { id = g.id, part = z and z.part, grab = grab } else nil
+		local was = SP.hover:peek()
+		if (now == nil) ~= (was == nil) or (now and was and (now.id ~= was.id or now.grab ~= was.grab or not Spacing.same(now.part, was.part))) then
+			SP.hover:set(now)
+		end
+		if g and grab and z then
+			cursor:set(SP.cursor(g, z.part))
+			return true
+		end
+		return false
+	end
+	function SP.cursor(g: any, part: any): string
+		if part.kind == "gap" then
+			return if g.lay == "horizontal" then "ew_resize" else "ns_resize"
+		end
+		return if part.side == 1 or part.side == 3 then "ns_resize" else "ew_resize"
+	end
+	-- A drag step: new values, the frame laid out again on the lifted
+	-- canvas (D6: the board doesn't change until the answer).
+	function SP.drag_to(d: Drag, x: number, y: number, e: any)
+		local g = d.g
+		local gap, pad = Spacing.values(g, d.part, x - d.px, y - d.py, e.shift, e.alt)
+		d.gap, d.pad = gap, pad
+		local g2, live = Spacing.relayout(g, gap, pad)
+		if not d.lifted then
+			lift(d, { g.id }, true)
+		end
+		for k, item in lifted:peek() do
+			if item.id == g.id then
+				lifted:set_key({ k, "live" }, live)
+			end
+		end
+		local n = ix:peek().by[g.id]
+		shown:set({
+			kind = "spacing",
+			boxes = { [g.id] = { m = n.m, w = g2.b[3], h = g2.b[4], bounds = g2.b } },
+			ids = { g.id },
+			spacing = { g = g2, part = d.part },
+		})
+	end
+	-- A second press on the same handle: a box to type the value in.
+	SP.typing = ui.use_state(nil :: any)
+	SP.last = nil :: any
+	function SP.press(d: Drag, z: any, e: any)
+		local now = ui.now()
+		local lp = SP.last
+		if lp and now - lp.at < DOUBLE_MS and Spacing.same(lp.part, z.part) and math.abs(lp.x - e.local_x) <= 4 and math.abs(lp.y - e.local_y) <= 4 then
+			SP.last = nil
+			d.kind = "noop"
+			SP.typing:set({ g = d.g, part = z.part, value = z.value, x = e.local_x, y = e.local_y })
+			return
+		end
+		SP.last = { at = now, part = z.part, x = e.local_x, y = e.local_y }
+	end
+	function SP.commit(text: string)
+		local t = SP.typing:peek()
+		SP.draft = nil
+		if not t then
+			return -- (already committed: Enter, then the blur)
+		end
+		SP.typing:set(nil)
+		local el = surface:peek()
+		if el then
+			el:focus()
+		end
+		local v = tonumber((string.gsub(text, "%s", "")))
+		if not t or not v then
+			return
+		end
+		v = math.max(0, math.floor(v * 100 + 0.5) / 100)
+		local g = t.g
+		local gap, pad = g.g, table.clone(g.p)
+		if t.part.kind == "gap" then
+			gap = v
+		else
+			pad[t.part.side] = v
+		end
+		send(Spacing.ops(g, gap, pad), if t.part.kind == "gap" then "Gap" else "Padding")
+	end
+	function SP.finish(d: Drag, sh0: any)
+		if not (d.moved and d.gap) then
+			clear_live()
+			drop_lifted()
+			return
+		end
+		local ops = Spacing.ops(d.g, d.gap, d.pad)
+		hold_shown(sh0)
+		send(ops, if d.part.kind == "gap" then "Gap" else "Padding")
 	end
 	local function link_handle(): (number?, number?, string?)
 		if not proto_on() then
@@ -1845,6 +1966,12 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 	local function on_press(e: any)
 		local v = view:peek()
 		if not v then
+			return
+		end
+		-- (N7) a press on the open spacing value box: the board takes the
+		-- pointer, so leave it be (focus stays in the box)
+		local spt = SP.typing:peek()
+		if spt and e.local_x >= spt.x + 10 and e.local_x <= spt.x + 66 and e.local_y >= spt.y - 11 and e.local_y <= spt.y + 11 then
 			return
 		end
 		-- (D2) a press elsewhere lets a drawn text's wait for its editor go
@@ -1984,6 +2111,21 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			d.parent = drop_target(cx, cy, {})
 			return
 		end
+		-- (N7) A spacing handle of the selected auto layout frame.
+		do
+			local sg, sz, sgrab = SP.at(e.local_x, e.local_y)
+			if sg and sz and sgrab then
+				d.kind = "spacing"
+				d.g = sg
+				d.part = sz.part
+				SP.hover:set(nil) -- (shown again on the next move after the drop)
+				cursor:set(SP.cursor(sg, sz.part))
+				if SP.press then
+					SP.press(d, sz, e)
+				end
+				return
+			end
+		end
 		-- A second press on one spot (the system's count, or ours: inspect's
 		-- replays count each press alone): into the group under the pointer,
 		-- or into a text to edit it.
@@ -2085,6 +2227,14 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 				end
 			end
 			cursor:set(if space or t == "hand" then "grab" elseif t == "eyedrop" then "crosshair" elseif t ~= "move" then "crosshair" elseif on_handle then "crosshair" elseif z then zone_cursor(z) else "default")
+			-- (N7) the spacing zone under the pointer, a handle's cursor
+			if z or on_handle then
+				if SP.hover:peek() ~= nil then
+					SP.hover:set(nil)
+				end
+			else
+				SP.hover_at(e.local_x, e.local_y)
+			end
 			local cx, cy = to_canvas(e.local_x, e.local_y)
 			local held = ui.modifiers
 			local h = label_at(e.local_x, e.local_y) or Model.hit(ix:peek(), cx, cy, sel(), held.control:peek() or held.meta:peek(), nil)
@@ -2158,6 +2308,8 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			resize_to(d, cx, cy, mods)
 		elseif d.kind == "rotate" then
 			rotate_to(d, cx, cy, mods)
+		elseif d.kind == "spacing" then
+			SP.drag_to(d, cx, cy, mods)
 		elseif d.kind == "marquee" then
 			marquee_to(d, cx, cy, mods)
 		elseif d.kind == "draw" then
@@ -2476,6 +2628,13 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		end
 	end
 
+	-- (N1) Agents' changes animated over the board (agent_fx.luau): the
+	-- service's, or the Canvas's own (the harness and films set it). "Reduce
+	-- agent animations" (the shell's palette, kept in prefs) or the system's
+	-- reduced motion: nothing moves, the flash outline below shows instead.
+	local agent_fx = (source :: any).agent_fx or ui.state(`canvas.{tab_id}.agent_fx`, {} :: { any })
+	local reduce_fx = AgentFx.reduced
+
 	-- Agents' flashes: each changed node outlined, fading out.
 	local flashes = source.flashes
 	local clock = ui.use_state(0)
@@ -2629,19 +2788,25 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 				outline(n.m, n.it.box.w, n.it.box.h, L.agent, 1.5, L.agent_soft)
 				local b = n.bounds
 				local who = if n.it.by and source.chat_title then source.chat_title(n.it.by) else nil
-				pill(sx(b[1] + b[3]), sy(b[2]) - 26, if who then `{who} · In progress` else "In progress", L.agent, L.on_accent, "end", true, glyph_busy)
+				-- (N1: the working dots sit at the top right, the pill before them)
+				pill(sx(b[1] + b[3]) - AgentFx.DOTS_W - 8, sy(b[2]) - 26, if who then `{who} · In progress` else "In progress", L.agent, L.on_accent, "end", true, glyph_busy)
 			end
 		end
 		-- Flashes.
 		if flashes then
 			local _ = clock:get()
 			local now = ui.now()
+			-- (N1: the outline only when agent animations are reduced; else
+			-- agent_fx.luau's sweep and ring show the change)
+			local quiet_fx = reduce_fx()
 			for _, f in flashes:get() do
 				local n = i.by[f.id]
 				local age = now - f.at
 				if n and age < FLASH_MS then
 					local o = (1 - age / FLASH_MS) ^ 1.6
-					outline(n.m, n.it.box.w, n.it.box.h, Draw.fade(L.accent .. "ff", o), 2)
+					if quiet_fx then
+						outline(n.m, n.it.box.w, n.it.box.h, Draw.fade(L.accent .. "ff", o), 2)
+					end
 					if f.label then
 						local b = n.bounds
 						-- (At its top right: a Screen's name is at its top left.)
@@ -2799,6 +2964,23 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 				c:line(hx, hy - 3.5, hx, hy + 3.5, L.accent, 1.5)
 			end
 			note(perf.noodles, (os.clock() - t0) * 1000)
+		end
+		-- (N7) Spacing handles: the selected auto layout frame's gap and
+		-- padding while the pointer is in it, or being dragged.
+		do
+			local hov = SP.hover:get()
+			local spd = if sh and sh.kind == "spacing" then sh.spacing else nil
+			local g0, hot = nil, nil
+			if spd then
+				g0, hot = spd.g, spd.part
+			elseif hov and not sh and not ed and #s == 1 and s[1] == hov.id then
+				g0, hot = Spacing.geom(i, hov.id), hov.part
+			end
+			if g0 then
+				Spacing.draw(c, Spacing.zones(g0, v.zoom), v.zoom, sx, sy, hot, spd ~= nil, function(x: number, y: number, text: string, bg: string, fg: string, anchor: string)
+					pill(x, y, text, bg, fg, anchor, false)
+				end)
+			end
 		end
 		-- Guides, and Alt's measurements.
 		local g = if sh then sh.guides else nil
@@ -2959,6 +3141,8 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			-- What the overlay shows of a drag (its live boxes, snapped): for
 			-- films that check each frame's picture (pure/tests/board_tiles.py).
 			shown = shown,
+			-- (N1) the agent animations' list (agent_fx.luau), for films
+			agent_fx = agent_fx,
 			select = select,
 			render_png = render_png,
 			render_layer = render_layer,
@@ -3232,6 +3416,7 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		on_hover = function(on: boolean)
 			if not on and not drag then
 				hover:set(nil)
+				SP.hover:set(nil)
 			end
 		end,
 		on_key = function(k: any): boolean?
@@ -3312,6 +3497,9 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 				note(perf.items, (os.clock() - t0) * 1000)
 			end,
 		},
+		-- (N1) An agent's changes and working dots, animated in Rust over the
+		-- board (which is drawn once), under the selection's marks.
+		AgentFx.Layer({ id = `design-{tab_id}`, fx = agent_fx, ix = ix, view = view, size = size, look = look, reduce = reduce_fx }),
 		-- Selection, hover, handles, guides: crisp at any zoom (screen points:
 		-- few marks, drawn again as the view moves).
 		-- zgx-lint: allow(canvas-view)
@@ -3325,6 +3513,68 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			pointer_events = "none",
 			draw = draw_overlay,
 		},
+		-- (N7) Typing a gap or padding value (a double-click on its handle).
+		ui.show(function(): boolean
+			return SP.typing:get() ~= nil
+		end, ui.component(function(): Node
+			local t = SP.typing:peek() or { value = 0, x = 0, y = 0 }
+			return ui.input {
+				id = `design-spacing-field-{tab_id}`,
+				label = "Spacing value",
+				absolute = true,
+				left = t.x + 10,
+				top = t.y - 11,
+				w = 56,
+				h = 22,
+				px = 6,
+				py = 0,
+				rounded = 5,
+				border = 1,
+				border_color = Spacing.COLOR,
+				bg = "#FFFFFF",
+				color = "#111111",
+				text_size = 12,
+				font = Look.UI,
+				focus = { outline = 0 },
+				value = Spacing.fmt(t.value),
+				select_on_focus = true,
+				on_change = function(text: string)
+					SP.draft = text
+				end,
+				on_commit = SP.commit,
+				on_key = function(k: any): boolean?
+					if k.key == "Enter" then
+						SP.commit(SP.draft or Spacing.fmt(t.value))
+						return true
+					end
+					if k.key == "Escape" then
+						SP.draft = nil
+						SP.typing:set(nil)
+						local el = surface:peek()
+						if el then
+							el:focus()
+						end
+						return true
+					end
+					return nil
+				end,
+				on_blur = function()
+					-- (Figma: leaving the box keeps what was typed)
+					ui.after(0, function()
+						if SP.typing:peek() and SP.draft then
+							SP.commit(SP.draft)
+						else
+							SP.typing:set(nil)
+						end
+					end)
+				end,
+				on_mount = function(el: any)
+					SP.draft = nil
+					el:focus()
+					el:select_all()
+				end,
+			}
+		end)({})),
 		-- The words of a text being edited, held by a real field out of sight
 		-- over it (an input method puts its window there).
 		ui.show(function(): boolean

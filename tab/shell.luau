@@ -33,6 +33,8 @@ local PlayPlace = require("./play_place")
 local ProtoPanel = require("./proto_panel")
 local IaClip = require("./ia_clip")
 local CommentsUI = require("./comments_ui")
+local VariationsBar = require("./variations_bar") -- (N2)
+local HistoryUI = require("./history_ui") -- (N3) the left panel's History tab
 
 local M = {}
 
@@ -71,6 +73,9 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 	-- narrow window), unless the person showed or hid one themselves.
 	local width = ui.use_state(0)
 	local prefs = props.prefs
+	-- (N1) "Reduce agent animations": kept in prefs, read by the Canvas.
+	local reduce_fx = require("./agent_fx").reduce
+	reduce_fx:set(prefs ~= nil and prefs.get("reduce_agent_fx") == true)
 	local function auto_open(min_w: number, key: string?): any
 		-- (a kept choice is there from the first build: no default flashes first)
 		local kept = if key and prefs then prefs.get(key) else nil
@@ -244,6 +249,7 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 	-- its groups, Delete last in red; on the empty Canvas, Paste here and Zoom
 	-- to fit. Shortcuts as the redesign writes them ("Ctrl ⇧ R", "Del").
 	local copy_as_open = ui.use_state(false)
+	local open_brief: (() -> ())? = nil -- (N6) set by the brief's code below
 	local function context_menu(ids: { string }, _x: number, _y: number): { Node }?
 		local items: { Node } = {}
 		local any = #ids > 0
@@ -399,7 +405,24 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 		saving = { icon = "loader", text = "Saving…" },
 		error = { icon = "cloudOff", text = "Not saved · retrying" },
 	}
-	local building = ui.computed(function(): { label: string, more: number }?
+	-- (N1) How long an agent shows as here after its last call, and a tick
+	-- to read that again (one timer while one shows, not a frame clock).
+	local AGENT_HERE_MS = 120000
+	local agents_tick = ui.use_state(0)
+	if source.agents then
+		ui.effect(function()
+			local list = source.agents:get()
+			if #list > 0 then
+				ui.after(8100, function()
+					agents_tick:set(agents_tick:peek() + 1)
+				end)
+				ui.after(AGENT_HERE_MS + 100, function()
+					agents_tick:set(agents_tick:peek() + 1)
+				end)
+			end
+		end)
+	end
+	local building = ui.computed(function(): { label: string, more: number, live: boolean? }?
 		local seen: { [string]: boolean } = {}
 		local list: { { by: any, screen: string } } = {}
 		for _, r in source.roots:get() or {} do
@@ -415,11 +438,25 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			end
 		end
 		if #list == 0 then
-			return nil
+			-- (N1) no Screen in progress: an agent that changed or read this
+			-- Design lately is still shown as here (`source.agents`)
+			local _ = agents_tick:get()
+			local now = ui.now()
+			local here = {}
+			for _, a in (if source.agents then source.agents:get() else {}) do
+				if a.busy or now - (a.at or 0) < AGENT_HERE_MS then
+					table.insert(here, a)
+				end
+			end
+			if #here == 0 then
+				return nil
+			end
+			local a = here[1]
+			return { label = if a.busy then `{a.name} is working` else `{a.name} is here`, more = #here - 1, live = a.busy or now - (a.at or 0) < 8000 }
 		end
 		local first = list[1]
 		local who = if source.chat_title and first.by then source.chat_title(first.by) else nil
-		return { label = `{who or "An agent"} is building {first.screen}`, more = #list - 1 }
+		return { label = `{who or "An agent"} is building {first.screen}`, more = #list - 1, live = true }
 	end)
 	local title = Kit.bar(L, {
 		id = "titlebar",
@@ -433,7 +470,30 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 		gap = 10,
 		direction = "row",
 		items = "center",
-		ui.text { source.name or "Design", text_size = 13, weight = 600, color = L.fg, font = Look.UI, truncate = true, min_w = 0, shrink = 1 },
+		-- (N6) the name opens the Design brief (as the palette's "Design brief")
+		ui.button {
+			id = "title-brief",
+			label = "Design brief",
+			tooltip = Kit.tip(L, "Design brief"),
+			tooltip_placement = { side = "bottom", align = "start", offset = 8 },
+			h = 28,
+			px = 6,
+			mx = -6,
+			rounded = 7,
+			border = 0,
+			bg = CLEAR,
+			hover = { bg = L.hover },
+			focus = { outline = 0 },
+			items = "center",
+			min_w = 0,
+			shrink = 1,
+			on_click = function()
+				if open_brief then
+					open_brief()
+				end
+			end,
+			ui.text { source.name or "Design", text_size = 13, weight = 600, color = L.fg, font = Look.UI, truncate = true, min_w = 0, shrink = 1 },
+		},
 		ui.presence(save_kind, function(kind: string): Node
 			local s = SAVE[kind]
 			local c = if kind == "error" then L.danger else L.faint
@@ -468,7 +528,26 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 					items = "center",
 					min_w = 0,
 					shrink = 1,
-					ui.div { w = 6, h = 6, rounded = 3, bg = L.agent, shrink = 0 },
+					-- (N1) the agent's dot: breathing while it works, still after
+					-- or with agent animations reduced
+					ui.presence(function(): string
+						local b = building:get()
+						return if b and b.live and not reduce_fx:get() then "live" else "still"
+					end, function(k: string): Node
+						return ui.div {
+							id = "agent-status-dot",
+							w = 6,
+							h = 6,
+							rounded = 3,
+							bg = L.agent,
+							shrink = 0,
+							on_mount = if k == "live" then function(el: any)
+								pcall(function()
+									anime.animate(el, { opacity = { 1, 0.25 }, duration = 700, ease = "inOutSine", loop = true, alternate = true, frame_rate = 30 })
+								end)
+							end else nil,
+						}
+					end, { direction = "row", items = "center", shrink = 0 }),
 					ui.text {
 						function(): string
 							local b = building:get()
@@ -499,7 +578,7 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 
 	-- The left panel's tabs: 32px icon buttons at the head's right (active:
 	-- accent_soft, the icon in accent).
-	local TAB_NAMES = { layers = "Layers", components = "Components", comments = "Comments" }
+	local TAB_NAMES = { layers = "Layers", components = "Components", comments = "Comments", history = "History" }
 	-- (step 7) Local comments in the editor: the left panel's Comments tab
 	-- lists them; while it's open their pins show on the board (elements over
 	-- the Canvas, not drawn into it). `cmt.open`: a pin's card open.
@@ -1046,9 +1125,23 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			tab_btn("layers", "Layers", "layers"),
 			tab_btn("components", "Components", "component"),
 			tab_btn("comments", "Comments", "message"),
+			tab_btn("history", "History", "history"),
 		},
 		ui.div { w_full = true, h = 1, bg = L.border, shrink = 0 },
 		ui.presence(left_tab, function(which: string): Node
+			if which == "history" then
+				-- (N3) agents' changes newest first: before/after, Undo / Undo to here
+				return HistoryUI.List {
+					L = L,
+					history = source.history,
+					chat_title = source.chat_title,
+					zoom = function(id: string)
+						if api and api.zoom_to_root then
+							api.zoom_to_root(id)
+						end
+					end,
+				}
+			end
 			if which == "comments" then
 				-- (step 7) the Design's comments; a click shows its Screen and its card
 				return CommentsUI.List {
@@ -1346,9 +1439,23 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 	-- session; the Prototype tab shows the Flows with nothing selected.
 	local panel_tab = ui.state(`design.{props.id or "design"}.panel_tab`, "design")
 	local show_all_links = ui.state(`design.{props.id or "design"}.show_all_links`, false)
+	-- (N4) The Design's brief: the Design tab shows it with nothing selected
+	-- once asked for (command palette "Design brief"), until the panel hides.
+	local brief_open = ui.use_state(false)
 	local props_shown = ui.computed(function(): boolean
-		return props_open:get() and (#(source.selection:get() or {}) > 0 or panel_tab:get() == "prototype")
+		return props_open:get() and (#(source.selection:get() or {}) > 0 or panel_tab:get() == "prototype" or (brief_open:get() and source.brief ~= nil))
 	end)
+	ui.effect(function()
+		if not props_open:get() then
+			brief_open:set(false)
+		end
+	end)
+	open_brief = function()
+		source.selection:set({})
+		panel_tab:set("design")
+		brief_open:set(true)
+		props_open:set(true)
+	end
 
 	-- Play (proto-step1-spec §6): from the selected Screen, else the flow
 	-- (a menu when there are several), else the first Screen.
@@ -2143,6 +2250,10 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			{ section = "Edit", label = "Undo", icon = "undo", keys = { "Ctrl", "Z" }, run = function()
 				source.undo()
 			end },
+			-- (N4) the Design's brief, in the properties with nothing selected
+			{ section = "Edit", label = "Design brief", icon = "panelRight", run = function()
+				(open_brief :: any)()
+			end },
 			{ section = "Edit", label = "Redo", icon = "redo", keys = { "Ctrl", "⇧", "Z" }, run = function()
 				source.redo()
 			end },
@@ -2227,6 +2338,14 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 			end },
 			{ section = "View", label = "Variables", icon = "braces", run = function()
 				vars_open:set(not vars_open:peek())
+			end },
+			-- (N1) agents' building animations on the board, on or off
+			{ section = "View", label = if reduce_fx:peek() then "Show agent animations" else "Reduce agent animations", icon = "sparkles", run = function()
+				local on = not reduce_fx:peek()
+				reduce_fx:set(on)
+				if prefs then
+					prefs.set("reduce_agent_fx", on)
+				end
 			end },
 			{ section = "Prototype", label = "Play prototype", icon = "play", keys = { "Ctrl", "Enter" }, run = function()
 				start_play()
@@ -2620,6 +2739,15 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 				end)
 			end,
 		},
+		-- One layer for the pins and the Variations bar: a new child of this
+		-- overlay (even an empty div) cuts the Canvas off from the pointer.
+		ui.div {
+		absolute = true,
+		left = 0,
+		top = 0,
+		right = 0,
+		bottom = 0,
+		pointer_events = "none",
 		-- (step 7) comment pins on the board while the Comments tab is open
 		if source.comments then CommentsUI.Pins {
 			L = L,
@@ -2644,6 +2772,30 @@ function M.Shell(props: { source: any, dark: boolean?, id: string?, expose: ((ap
 				return left_tab:get() ~= "comments"
 			end,
 		} else ui.div {},
+		-- (N2) the Variations bar under a node an agent made versions of
+		if (source :: any).variations then VariationsBar.Layer {
+			id = `design-{props.id}`,
+			sets = (source :: any).variations,
+			view = function(): any
+				return if api_ready:get() and api then api.view:get() else nil
+			end,
+			ix = function(): any
+				return if api_ready:get() and api then api.index:get() else nil
+			end,
+			size = function(): any
+				return { w = width:get(), h = pre.hgt:get() }
+			end,
+			hidden = function(): boolean
+				return playing:get() ~= nil
+			end,
+			dark = function(): boolean
+				return if source.dark then source.dark:get() == true else props.dark == true
+			end,
+			edit = function(ops: { any }, label: string)
+				source.edit(ops, label)
+			end,
+		} else ui.div {},
+		},
 		title,
 		ui.show(function(): boolean
 			return left_open:get()
