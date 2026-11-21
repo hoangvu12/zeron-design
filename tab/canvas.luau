@@ -6,7 +6,9 @@ local ui = require("./pointer").ui
 -- person does on it, from port/web/canvas.js:
 --
 -- - the view: the wheel pans (Shift: sideways), Ctrl+wheel or a pinch zooms
---   about the pointer, Space-drag or the middle button pans; Ctrl+0 is 100 %,
+--   about the pointer, Space-drag pans, and so does a drag with the middle
+--   button held where zgx has `on_aux_press` (else a middle click does
+--   nothing); Ctrl+0 is 100 %,
 --   Shift+1 fits, Shift+2 zooms to the selection, Ctrl +/- step;
 -- - selection: hover outline, click (a Screen's direct child first, deeper
 --   inside the selection's branch, Ctrl the innermost), Shift adds or takes
@@ -101,6 +103,19 @@ local function round(v: number): number
 	return math.floor(v + 0.5)
 end
 
+-- (Z4) Whether this zgx has `on_aux_press` / `on_aux_release` (the node
+-- keeps the pointer while the middle button is held): nightlies before it
+-- reject the key as an unknown property, so the board then leaves the
+-- middle button alone, as before.
+local AUX_PRESS = pcall(ui.overlay, { on_aux_press = function() end } :: any)
+local function with_aux(t: any, press: (e: any) -> (), release: (e: any) -> ()): any
+	if AUX_PRESS then
+		t.on_aux_press = press
+		t.on_aux_release = release
+	end
+	return t
+end
+
 local function fmt(v: number): string
 	local r = round(v * 100) / 100
 	if r == math.floor(r) then
@@ -149,6 +164,9 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 	-- layout frame (`{ id, part, grab }`), and the functions (one local).
 	local SP: any = { hover = ui.use_state(nil :: any) }
 	local space = false
+	-- (Z4) The middle button held down on the board: where the pointer last
+	-- was (panel points) while it pans the board, as Figma's.
+	local mid: { x: number, y: number }? = nil
 	local drag: Drag? = nil
 	local field = ui.ref()
 	local surface = ui.ref()
@@ -1965,7 +1983,7 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 
 	local function on_press(e: any)
 		local v = view:peek()
-		if not v then
+		if not v or mid then
 			return
 		end
 		-- (N7) a press on the open spacing value box: the board takes the
@@ -2207,6 +2225,17 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		if not v then
 			return
 		end
+		-- (Z4) Panning with the middle button: nothing else (hover, handles,
+		-- a drag's drop or resize) while it is held.
+		local m = mid
+		if m then
+			local dx, dy = e.local_x - m.x, e.local_y - m.y
+			m.x, m.y = e.local_x, e.local_y
+			if dx ~= 0 or dy ~= 0 then
+				pan(dx, dy)
+			end
+			return
+		end
 		local d = drag
 		if not d then
 			if editing:peek() then
@@ -2337,6 +2366,30 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		if d then
 			finish(d, false)
 		end
+	end
+
+	-- (Z4) The middle button pans the board while it is held, wherever it
+	-- is pressed (a Screen, a layer, the empty board), selecting nothing.
+	-- A press while a primary drag goes on is left alone.
+	local function on_aux_press(e: any)
+		if e.button ~= "middle" or drag or mid or not view:peek() then
+			return
+		end
+		mid = { x = e.local_x, y = e.local_y }
+		if hover:peek() ~= nil then
+			hover:set(nil)
+		end
+		if SP.hover:peek() ~= nil then
+			SP.hover:set(nil)
+		end
+		cursor:set("grabbing")
+	end
+	local function on_aux_release(_e: any)
+		if not mid then
+			return
+		end
+		mid = nil
+		cursor:set(if space or tool:peek() == "hand" then "grab" else "default")
 	end
 
 	-- Keys -------------------------------------------------------------------------------
@@ -3138,6 +3191,9 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 			hover = hover,
 			tool = tool,
 			index = ix,
+			-- The board's cursor ("grabbing" while the middle button pans):
+			-- for pure/zgx/z4's test.
+			cursor = cursor,
 			-- What the overlay shows of a drag (its live boxes, snapped): for
 			-- films that check each frame's picture (pure/tests/board_tiles.py).
 			shown = shown,
@@ -3276,7 +3332,7 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 	end
 
 	-- The tree ----------------------------------------------------------------------------
-	return ui.overlay {
+	return ui.overlay(with_aux({
 		id = `design-canvas-{tab_id}`,
 		role = "group",
 		label = "Design canvas",
@@ -3348,6 +3404,8 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 		on_press = on_press,
 		on_pointer_move = on_move,
 		on_release = on_release,
+		-- A middle click stops here (the shell around takes none of it); the
+		-- middle button's drag pans the board: on_aux_press, with_aux.
 		on_aux_click = function(_e: any) end,
 		-- Right click: what's under the pointer selected first (unless it's
 		-- in the selection), then the shell's menu for the selection.
@@ -3737,5 +3795,5 @@ return function(props: { source: Source, id: string?, expose: ((api: any) -> ())
 				end,
 			},
 		},
-	}
+	}, on_aux_press, on_aux_release))
 end
