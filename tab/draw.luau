@@ -818,7 +818,10 @@ local function draw_fill(c: Canvas, it: any, m: Affine, op: number, skip_gif: bo
 				if not ok and M.on_error then
 					M.on_error(`image {src}: {err}`)
 				end
-			elseif string.sub(src, 1, 8) == "missing:" or string.sub(src, 1, 4) == "img:" or src == "" then
+			elseif string.sub(src, 1, 8) == "missing:" or string.sub(src, 1, 4) == "img:" or src == ""
+				-- (a web url the service hasn't stored yet: the canvas can't
+				-- fetch it, and `c:image(url)` would draw nothing at all)
+				or string.match(string.lower(src), "^https?://") then
 				c:rect(x, y, w, h, fade("#8080801f", op), radius)
 				c:line(x, y, x + w, y + h, fade("#80808066", op), 1)
 				c:line(x + w, y, x, y + h, fade("#80808066", op), 1)

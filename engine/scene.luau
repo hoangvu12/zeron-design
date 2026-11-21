@@ -75,10 +75,13 @@ local function paint(v: any, images: any?): any
 	elseif v.type == "image" then
 		local url = if type(v.url) == "string" then v.url else ""
 		local src
-		if string.match(string.lower(url), "^https?://") then
-			src = url
-		elseif images and images[url] then
+		-- (A stored picture first: web pictures are fetched by the service,
+		-- engine/images.luau fetch_remote; a web url not stored yet stays a
+		-- url, which the tab draws as a placeholder.)
+		if images and images[url] then
 			src = images[url]
+		elseif string.match(string.lower(url), "^https?://") then
+			src = url
 		else
 			src = "missing:" .. url
 		end

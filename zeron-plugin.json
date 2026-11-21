@@ -1,10 +1,11 @@
 {
-  "id": "design-pure",
-  "name": "Design (pure)",
-  "version": "0.6.1",
   "description": "Design screens with your agents on a Canvas beside the chat: pure Luau, no companion program. Agents use design_execute, design_state and design_guide.",
   "entry": "init.luau",
-  "service": "service.luau",
+  "id": "design-pure",
+  "limits": {
+    "memory_mb": 256
+  },
+  "name": "Design (pure)",
   "permissions": [
     "service",
     "tools",
@@ -20,85 +21,8 @@
     "pages.add",
     "compose"
   ],
-  "tools": [
-    {
-      "name": "design_execute",
-      "description": "Make or change a Design (Screens on a Canvas) by running a Luau snippet against it; returns the ids of the nodes it returned or kept in G (verbose = true: every new node's), what it printed, warnings and screenshots. Read the design guide first (design_guide, or the guide your first call returns).",
-      "input": {
-        "type": "object",
-        "properties": {
-          "snippet": {
-            "type": "string",
-            "description": "Luau calling Insert, Copy, Update, Replace, Move, Delete, Get, FindByName, FindAll, CheckFits, SetTokens, GetTokens, SetThemes, FindEmptySpace, TakeScreenshot and Print, as the design guide documents. Nodes are tables: { type = \"frame\", name = \"Card\", children = { ... } }."
-          },
-          "description": {
-            "type": "string",
-            "description": "What this call does, in a few words (it names the undo step)."
-          },
-          "name": {
-            "type": "string",
-            "description": "A name for a new Design."
-          },
-          "did": {
-            "type": "string",
-            "description": "The Design to change (a previous result's design.did, or one from design_state). With neither did nor name, the Design in your chat's front Design tab."
-          },
-          "verbose": {
-            "type": "boolean",
-            "description": "true: ids lists every node the call made, by name. By default it lists only those Insert/Copy/Replace returned and those the snippet kept in G or returned."
-          },
-          "editId": {
-            "type": "string",
-            "description": "Retries the failed call with this edit id, its snippet changed by edits; send no snippet, did or name with it."
-          },
-          "edits": {
-            "type": "array",
-            "description": "With editId: find-and-replace edits to the failed snippet, made in order; each find must be in it once.",
-            "items": {
-              "type": "object",
-              "properties": {
-                "find": {
-                  "type": "string"
-                },
-                "replace": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "find",
-                "replace"
-              ]
-            }
-          }
-        }
-      }
-    },
-    {
-      "name": "design_state",
-      "description": "Lists the Designs open in your chat's Design tabs (the front one first), each with what the person has selected in it, and the ones touched recently.",
-      "input": {
-        "type": "object",
-        "properties": {}
-      }
-    },
-    {
-      "name": "design_guide",
-      "description": "The design guide: the core guide without a topic, or a topic guide (components, design-systems, landing-pages, mobile-apps, web-apps, slides, tables, code, tailwind).",
-      "input": {
-        "type": "object",
-        "properties": {
-          "topic": {
-            "type": "string"
-          }
-        }
-      }
-    }
-  ],
-  "limits": {
-    "memory_mb": 256
-  },
+  "service": "service.luau",
   "signature": {
-    "key": "jJUWaYj8MHIhqOLOsNBRBMaK0IOZIb-ax7VdM909AKc",
     "files": {
       "engine/agent.luau": "505c946c758f3e0cc8b82f31eb699ef97f700ac8ef8f741608dc377078c66bff",
       "engine/agent_fx.luau": "22610b6d70467c458d7bf97def985542e52568c7e55bf22fabb3772001e09256",
@@ -111,16 +35,16 @@
       "engine/expr.luau": "b2f0529c99a1b57a5df00813941ec785cb11c151658a9e2986cd7494bda6d4a4",
       "engine/files.luau": "7efd2d0d420a4cce011682a59d2e1cded91f240c3c0218c150e478e1ffecd62e",
       "engine/guide.luau": "2a1e5f9be94aa684f0f70e6eea80c5a65194d84e3d174d4761c4dc6d0b0f036d",
-      "engine/guide_text.luau": "1596b19705ab09366735f9b7099bb1cc1db09caf889d1470d99f414f6263d9a9",
+      "engine/guide_text.luau": "1efa49e5889c9fec9e7779f94ab1ee42f9192ed4b93ea1542cb94e486a6b06f5",
       "engine/handoff.luau": "dd750633c4bcf2e7f93310900d9ddc485501872b0d8e8c3bd7002e893f7a2a64",
       "engine/history.luau": "130fe14713211e5fbee8dfbe2b0bc801af765539c3249afcc6d5a2d21fde1f71",
       "engine/icons.luau": "e14782a4fe861ea140608663bc91e51f0ab5c88173e156d5f863f55396eaa62c",
-      "engine/images.luau": "97613000ac7c4f0aca85369a7456363c513e6326e2b2f494d2d8d971655fc0f9",
+      "engine/images.luau": "0ea6b5b6dd38ac51520b7aeb0007fadcd7d1752e5cdfe6629b6af093ce284b6d",
       "engine/layout.luau": "847d85e8dc6b5fba89d5bd996a0b49fb2b655579363718fb7bd919ff333d8094",
       "engine/ops.luau": "079ea6743a53d47131946c2470c1fe1a1eab2c9ff0977e1429d0895a2cac3b43",
       "engine/proto.luau": "a4f98c01802d8bb31453a28a7bf81dcc33ff589e614a48e8c41c4a83344db352",
       "engine/resolve.luau": "c4da5ac42a5f0ae4519015440866246e4c5b9bf0a6b7511c4527b4f0759fbe9f",
-      "engine/scene.luau": "ec58a65f1d9c87a26bee08388f90325fdf24c15692bf72718d80b423f77d8f55",
+      "engine/scene.luau": "75b2589a1b651057da0b37e620dd265025957bf7dd7d9fbbfb6852fa54b80f03",
       "engine/share.luau": "2e07e86b758859b16effac6e2917dc343efb71cc36c6387296fae338dac820f9",
       "engine/sim.luau": "d72f923ef0e9e5f07bd7e0ec8fdf0bd092b21523f98f38460884f16de17c7bdf",
       "engine/text.luau": "7bf5fdfb4c4c841a436cdaabc56964d679b28bbc938c70b0f82fe88c3b3feb73",
@@ -136,13 +60,13 @@
       "fonts/Rubik-SemiBold.ttf": "3af9c8346eeb53fdc9e7f72b31f32228ad04e5c0b96373641701748f02dd58d8",
       "gallery.luau": "2422d480ef395ade28ca0ad41ea14f036f0d49d0ee72e2a0469c451a27f8cb65",
       "init.luau": "246abc014cc2861538cbb1c944bf48672265f69ba3562c54e348d94ece7a6623",
-      "service.luau": "12f8fb977b08f86a5abc12ad6f35b8d45fe3639e09da77726f0c2330fff842fc",
+      "service.luau": "b3ee0cb8a984789b6517c72998301f773cad1f7dbcbd481f83cd6420c4f78657",
       "tab/README.md": "f4b0d9901850192bb9691092af92cb23305fedbd0fa6e1964f2fdb857dc8169c",
       "tab/agent_fx.luau": "98b522f155803eb4e31323a0b028fc7f9fae392d890c3ec76b4b760d6bf2be3d",
       "tab/agent_fx_plan.luau": "80e5a10cf98ac8a315ab35eee65f41a78ae68a0fe41669bbd570ec1d454d6165",
       "tab/assets.luau": "3b89e5ba72f54c359f44421ce62c19bcc5b6883fcee06ba46a23c22c87096262",
       "tab/bind.luau": "8969f2bab4ee2d0d1ce16d2553a20910d1f06fe0c5bedfdc0b1fb903f6d99b6c",
-      "tab/canvas.luau": "dd200f8b14fc612b1d37c95813c53697171ebf075d02f80fcda6c5d47d26f705",
+      "tab/canvas.luau": "07ce75164f7d466c9bc1f943b4da4053175efae7bebfce74a75b8107de8da549",
       "tab/comments.luau": "f4c23bb38396ce73637534e6035120c699ebf8a1dfa65d9ab63eb88b8d721cc3",
       "tab/comments_rules.luau": "aa1c376ca0d21352f7a531fbf013845c12493511ffd33bbe60283da6338acd3f",
       "tab/comments_ui.luau": "4cb82b401261f85cd6e27ef2f4715a69988ebe11e2436cfa3302f4718baf8e2f",
@@ -150,7 +74,7 @@
       "tab/curve.luau": "7649800eb4228540fae1d28240705c4fda5526f5fbf82a9fa63f20ccfa2ee677",
       "tab/dev.luau": "1f0ba960f9c01fed7837138e3cf35c316dd9a49fecf1f568b8d9bc53b8ff0091",
       "tab/device_frame.luau": "85130377deee9c0f3989f2730a8afce99e81aedfaa72f549cb2772b8bc11cc26",
-      "tab/draw.luau": "a34931f1fd329163b4e07487ca5476d098b788c727de6b0e9af82b35e2ba1e57",
+      "tab/draw.luau": "bcf81eca69ab500a846383b66005305a53c45c08feb540676c8b5db0559cedac",
       "tab/expr.luau": "b2f0529c99a1b57a5df00813941ec785cb11c151658a9e2986cd7494bda6d4a4",
       "tab/gif.luau": "0edc3bd200ba35326e9826621623032cf2641b72f1634cd7296bac4434dd599f",
       "tab/guard.luau": "fdcd40bec19ac2c8dce146ffcff4187cc2b577b3a3c3d55f3826068311ec67bb",
@@ -195,6 +119,82 @@
       "tab/zgx.json": "9669d5ffa2c81cc403850456ebcc1b2ce1b8b7c49adf2b544d551edfe1f2efad",
       "zeron.luau": "bb9a98bd24183c84f86a1a476f5cf1085b56157485d12f917e679e2fddac41c3"
     },
-    "sig": "DO5RTKYRXigoDjyRuXpOOWMJeS8P0YUb1ST0hZnWWwHZ8clnRVrkFdBjuhRGDXfU5w3VR86uzwukPy7Ywq7kCg"
-  }
+    "key": "jJUWaYj8MHIhqOLOsNBRBMaK0IOZIb-ax7VdM909AKc",
+    "sig": "m52_iYIeFCvtoy9zaxXdh-9HrqOb04vP_gmILIBj9JzJ43KFyVPKiWowFbSKKTQie44m8KUQVpKqSPL4HNjVAQ"
+  },
+  "tools": [
+    {
+      "description": "Make or change a Design (Screens on a Canvas) by running a Luau snippet against it; returns the ids of the nodes it returned or kept in G (verbose = true: every new node's), what it printed, warnings and screenshots. Read the design guide first (design_guide, or the guide your first call returns).",
+      "input": {
+        "properties": {
+          "description": {
+            "description": "What this call does, in a few words (it names the undo step).",
+            "type": "string"
+          },
+          "did": {
+            "description": "The Design to change (a previous result's design.did, or one from design_state). With neither did nor name, the Design in your chat's front Design tab.",
+            "type": "string"
+          },
+          "editId": {
+            "description": "Retries the failed call with this edit id, its snippet changed by edits; send no snippet, did or name with it.",
+            "type": "string"
+          },
+          "edits": {
+            "description": "With editId: find-and-replace edits to the failed snippet, made in order; each find must be in it once.",
+            "items": {
+              "properties": {
+                "find": {
+                  "type": "string"
+                },
+                "replace": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "find",
+                "replace"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "A name for a new Design.",
+            "type": "string"
+          },
+          "snippet": {
+            "description": "Luau calling Insert, Copy, Update, Replace, Move, Delete, Get, FindByName, FindAll, CheckFits, SetTokens, GetTokens, SetThemes, FindEmptySpace, TakeScreenshot and Print, as the design guide documents. Nodes are tables: { type = \"frame\", name = \"Card\", children = { ... } }.",
+            "type": "string"
+          },
+          "verbose": {
+            "description": "true: ids lists every node the call made, by name. By default it lists only those Insert/Copy/Replace returned and those the snippet kept in G or returned.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "design_execute"
+    },
+    {
+      "description": "Lists the Designs open in your chat's Design tabs (the front one first), each with what the person has selected in it, and the ones touched recently.",
+      "input": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "design_state"
+    },
+    {
+      "description": "The design guide: the core guide without a topic, or a topic guide (components, design-systems, landing-pages, mobile-apps, web-apps, slides, tables, code, tailwind).",
+      "input": {
+        "properties": {
+          "topic": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "design_guide"
+    }
+  ],
+  "version": "0.6.2"
 }

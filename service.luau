@@ -183,6 +183,9 @@ function M.scene(args: any): any
 		Layout.run(resolved)
 	end
 	Icons.need(Icons.used(resolved))
+	-- (Web pictures a Design named before they were fetched, or that failed
+	-- a while ago: fetched now; each url at most once a minute.)
+	pcall(Images.fetch_remote, d.did, d.doc)
 	local images = Images.links(d.did)
 	local function icon(name, weight)
 		return Icons.get(name, weight)
@@ -1300,6 +1303,15 @@ zeron.tool({
 			for _, f in absent do
 				result.warnings = result.warnings or {}
 				table.insert(result.warnings, { property = "fontFamily", message = `"{f}" isn't a Google Fonts family Design (pure) could fetch; its text draws in Geist` })
+			end
+		end) end
+		if committed then after("fetching pictures", function()
+			-- Web pictures it names: fetched and stored now, so the tab, its
+			-- screenshots and exports draw them (engine/images.luau).
+			local _, bad = Images.fetch_remote(d.did, d.doc)
+			for _, b in bad do
+				result.warnings = result.warnings or {}
+				table.insert(result.warnings, { property = "fill", message = `the picture {b.url} draws as a placeholder: {b.why}` })
 			end
 		end) end
 		if committed then

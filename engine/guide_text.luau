@@ -304,7 +304,7 @@ What isn't there, and what to do instead:
 - A hex string: `"#RGB"`, `"#RRGGBB"` or `"#RRGGBBAA"`.
 - `{ type = "color", color, opacity, blendMode, enabled }`.
 - `{ type = "gradient", gradientType = "linear" | "radial" | "angular", colors = { { color, position } }, center = { x, y }, size = { width, height }, rotation }`. Geometry is relative to the node's bounds (`center` 0 to 1, `size` 1 = the side). At `rotation = 0` a linear gradient runs upward (bottom colour first, top colour last); rotation is counter-clockwise. `colors` can also be plain hex strings, spaced evenly.
-- `{ type = "image", url, mode = "cover" | "contain" | "stretch" }`. `url` is an http(s) URL. A missing image draws as a placeholder. Images are fills only. An animated GIF is a plain image fill: the board shows its first frame, Play and the export play it (at most 8 MB and 1024 px a side; Play plays up to 16 small ones per Screen).
+- `{ type = "image", url, mode = "cover" | "contain" | "stretch" }`. `url` is a public http(s) URL (not a file path or a local server: those can't be reached). A missing image, or one that can't be fetched, draws as a placeholder, with a warning saying why. Images are fills only. An animated GIF is a plain image fill: the board shows its first frame, Play and the export play it (at most 8 MB and 1024 px a side; Play plays up to 16 small ones per Screen).
 
 `blendMode` is `normal`, `darken`, `multiply`, `colorBurn`, `lighten`, `screen`, `colorDodge`, `linearDodge`, `overlay`, `softLight`, `hardLight`, `difference`, `exclusion`, `hue`, `saturation`, `color` or `luminosity`.
 

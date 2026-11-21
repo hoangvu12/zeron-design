@@ -365,4 +365,93 @@ function M.missing(doc: any, links: { [string]: string }): { string }
 	return out
 end
 
+-- ── pictures from the web ───────────────────────────────────────────────
+-- The window's canvas can't fetch a url itself (`c:image(url)` draws nothing
+-- on this zgx, with no error), so the service fetches each http(s) picture a
+-- Design names (`zeron.fetch`, as fonts and icons are), keeps its bytes here
+-- and links the url to them: the scene then shows `img:<key>` like any
+-- stored picture, and screenshots and exports draw it. (Zeron keeps plugins
+-- off this device and your network unless the manifest names each host, and
+-- naming any host shuts out every web host not named, so local servers'
+-- pictures aren't fetched: they draw as placeholders, with a warning.)
+
+-- url -> os.time() of a failed fetch; tried again after RETRY seconds.
+local failed: { [string]: number } = {}
+local why_failed: { [string]: string } = {}
+M.RETRY = 60
+
+-- The http(s) image urls a Design names that have no picture yet.
+function M.remote(doc: any, links: { [string]: string }): { string }
+	local out, seen = {}, {}
+	local function visit(v)
+		if type(v) == "table" then
+			if v.type == "image" and type(v.url) == "string" then
+				local url = v.url
+				if string.match(string.lower(url), "^https?://") and not links[url] and not seen[url] then
+					seen[url] = true
+					table.insert(out, url)
+				end
+			end
+			for _, x in v do
+				if type(x) == "table" then
+					visit(x)
+				end
+			end
+		end
+	end
+	visit(doc.children)
+	table.sort(out)
+	return out
+end
+
+-- Fetches and stores the Design's web pictures that aren't stored yet.
+-- Returns the urls stored now and { url, why } for those that failed now or
+-- recently (each tried at most once per RETRY seconds).
+function M.fetch_remote(did: string, doc: any): ({ string }, { any })
+	local got, bad = {}, {}
+	if type(zeron.fetch) ~= "function" then
+		return got, bad
+	end
+	local urls = M.remote(doc, M.links(did))
+	for _, url in urls do
+		local at = failed[url]
+		if at and os.time() - at < M.RETRY then
+			table.insert(bad, { url = url, why = why_failed[url] or "it couldn't be fetched" })
+			continue
+		end
+		local ok, r = pcall(function()
+			return zeron.fetch(url, { binary = true, timeout = 20 }):await()
+		end)
+		local why = nil
+		if not ok then
+			local msg = tostring(r)
+			if string.find(msg, "on this device or your network", 1, true) then
+				why = "it's on this computer or your network, which Design (pure) can't reach: use a public https url"
+			else
+				why = "fetching it failed: " .. msg
+			end
+		elseif type(r) ~= "table" or r.status ~= 200 then
+			why = "the server answered " .. tostring(type(r) == "table" and r.status or "nothing")
+		elseif type(r.body) ~= "string" or r.body == "" then
+			why = "it came back empty"
+		else
+			local pok, img = pcall(M.put, r.body)
+			if pok and type(img) == "table" then
+				M.link(did, url, img.key)
+				failed[url] = nil
+				why_failed[url] = nil
+				table.insert(got, url)
+			else
+				why = (string.gsub(tostring(img), "^bad_params: ", ""))
+			end
+		end
+		if why then
+			failed[url] = os.time()
+			why_failed[url] = why
+			table.insert(bad, { url = url, why = why })
+		end
+	end
+	return got, bad
+end
+
 return M
